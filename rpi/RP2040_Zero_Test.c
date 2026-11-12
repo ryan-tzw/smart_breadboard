@@ -1,51 +1,46 @@
 #include <stdio.h>
-#include <stdlib.h>
 
 #include "pico/stdlib.h"
-#include "hardware/pio.h"
-#include "hardware/clocks.h"
-#include "ws2812.pio.h"
+#include "hardware/adc.h"
 
-void put_pixel(uint32_t pixel_grb)
-{
-    pio_sm_put_blocking(pio0, 0, pixel_grb << 8u);
-}
-void put_rgb(uint8_t red, uint8_t green, uint8_t blue)
-{
-    uint32_t mask = (green << 16) | (red << 8) | (blue << 0);
-    put_pixel(mask);
-}
+#define MUX_SELECT_MASK 0x0fu
+#define ADC_PIN 26
+#define ADC_INPUT 0
 
-int main()
+int main(void)
 {
-    //set_sys_clock_48();
+    // GPIO0 is S0 (LSB), through GPIO3 as S3 (MSB).
+    gpio_init_mask(MUX_SELECT_MASK);
+    gpio_put_masked(MUX_SELECT_MASK, 0);
+    gpio_set_dir_out_masked(MUX_SELECT_MASK);
+
+    adc_init();
+    adc_gpio_init(ADC_PIN);
+    adc_select_input(ADC_INPUT);
     stdio_init_all();
 
-    PIO pio = pio0;
-    int sm = 0;
-    uint offset = pio_add_program(pio, &ws2812_program);
-    uint8_t cnt = 0;
+    // Undo the 47 kohm / 68 kohm divider using a nominal 3.3 V reference.
+    const float input_volts_per_count = (3.3f / 4096.0f) * (115.0f / 68.0f);
 
-    puts("RP2040-Zero WS2812 Test");
-
-    ws2812_program_init(pio, sm, offset, 16, 800000, true);
-
-    while (1)
+    while (true)
     {
-        for (cnt = 0; cnt < 0xff; cnt++)
+        absolute_time_t next_scan = make_timeout_time_ms(1000);
+        puts("\nSmart breadboard scan (nominal 3.3 V ADC reference)");
+        puts("Channel  Raw ADC  Input voltage");
+
+        for (uint channel = 0; channel < 16; ++channel)
         {
-            put_rgb(cnt, 0xff - cnt, 0);
-            sleep_ms(3);
+            gpio_put_masked(MUX_SELECT_MASK, channel);
+            sleep_ms(1);
+            (void)adc_read(); // Discard the first conversion after switching.
+            uint16_t raw = adc_read();
+            float input_voltage = raw * input_volts_per_count;
+
+            printf("%7u  %7u  %8.3f V\n", channel, (unsigned int)raw,
+                   input_voltage);
         }
-        for (cnt = 0; cnt < 0xff; cnt++)
-        {
-            put_rgb(0xff - cnt, 0, cnt);
-            sleep_ms(3);
-        }
-        for (cnt = 0; cnt < 0xff; cnt++)
-        {
-            put_rgb(0, cnt, 0xff - cnt);
-            sleep_ms(3);
-        }
+
+        // Include settling and printing time in the one-second scan period.
+        sleep_until(next_scan);
     }
 }
