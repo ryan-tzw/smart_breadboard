@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "/mnt/work/Projects/Dev/c/smart_breadboard/rpi"
+    "cmake.sourceDirectory": "/mnt/work/Projects/Dev/c/smart_breadboard/rpi",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/rpi/build/compile_commands.json"
 }
