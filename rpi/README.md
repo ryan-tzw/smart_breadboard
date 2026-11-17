@@ -15,9 +15,35 @@ Output: `rpi/build/RP2040_Zero_Test.uf2`. Hold BOOT while pressing and releasing
 - GPIO0–3: MUX1 S0–S3; GPIO26: ADC0 through the existing 47 kΩ / 68 kΩ divider.
 - GPIO4–7: MUX2 S0–S3; GPIO8: MUX2 active-low enable.
 - GPIO27: injection through 10 kΩ to MUX2 COM.
-- Both MUXes use the same channel-to-node mapping. Selection and enable signals use the existing level shifters. GPIO9 is untouched.
+- GPIO9: WS2812B-2020 DIN through SN74AHCT125N; LEDs use a suitable 5 V supply and shared ground.
+- Both MUXes use the same channel-to-node mapping. Selection and enable signals use the existing level shifters. GPIO9 drives the ARGB LEDs through the level shifter.
 
 MUX2 is disabled during firmware startup, passive scans, command parsing, and between source injections. GPIO27 is an input without pulls when idle. It drives 3.3 V only during a probe. This is resistor-limited voltage injection, not a constant-current source.
+
+## ARGB driver (Milestone 6A)
+
+`led_strip.c/.h` provides a single-strip RGB driver on GPIO9. `LED_STRIP_COUNT` in `led_strip.h` defaults to 100; change it and rebuild for another count. The framebuffer has fixed static storage with no heap allocation. CMake generates `ws2812.pio.h` from the existing PIO program into `rpi/build/` and links `hardware_pio`.
+
+Startup initializes the driver and sends an all-off frame. Default brightness is 255. The API is:
+
+- `led_strip_set_pixel(index, r, g, b)`: update one stored RGB colour; indices outside the configured count are ignored.
+- `led_strip_fill(r, g, b)` / `led_strip_clear()`: update all stored colours.
+- `led_strip_set_brightness(value)`: set global brightness, 0–255, without modifying stored RGB values.
+- `led_strip_show()`: transmit and latch the stored frame in 24-bit GRB order, MSB first, at 800 kbit/s.
+
+Call `led_strip_init()` once (already done by `main.c`). Setters change memory only; call `led_strip_show()` to apply them. For example, from the main loop outside a probe:
+
+```c
+led_strip_set_brightness(32);
+led_strip_set_pixel(3, 255, 0, 0);
+led_strip_show();
+```
+
+`show()` blocks for approximately 3.3 ms at 100 LEDs while PIO generates the waveform; interrupts remain enabled. It drains the TX FIFO, allows 40 µs for the remaining shift-register data, then provides at least 300 µs low for reset/latching. This keeps the driver simple without DMA or background work. Call it outside active probing.
+
+For the optional hardware self-test, change `LED_STRIP_SELF_TEST` in `led_strip.h` from 0 to 1, rebuild, and flash manually. On startup the first three LEDs show dim red, green, and blue for 300 ms, then all LEDs turn off and normal monitoring resumes. With fewer than three LEDs, out-of-range test indices are ignored. Restore the flag to 0 afterward. The test is disabled by default and adds no serial output.
+
+Physical colour order, signal timing, and latch behaviour still require verification with the strip. LED serial commands and browser controls are later milestones.
 
 ## Passive monitoring
 

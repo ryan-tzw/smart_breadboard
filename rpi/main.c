@@ -5,6 +5,7 @@
 #include "hardware/sync.h"
 
 #include "command_parser.h"
+#include "led_strip.h"
 
 #define CHANNEL_COUNT 16
 #define MUX_SELECT_MASK 0x0fu
@@ -287,6 +288,22 @@ int main(void)
     adc_gpio_init(ADC_PIN);
     adc_select_input(ADC_INPUT);
     stdio_init_all();
+
+    // --------------------
+    // LED initialization and optional hardware test
+    // --------------------
+    led_strip_init();
+#if LED_STRIP_SELF_TEST
+    led_strip_set_brightness(16);
+    led_strip_set_pixel(0, 255, 0, 0);
+    led_strip_set_pixel(1, 0, 255, 0);
+    led_strip_set_pixel(2, 0, 0, 255);
+    led_strip_show();
+    sleep_ms(300);
+    led_strip_clear();
+    led_strip_show();
+    led_strip_set_brightness(255);
+#endif
 
     char command[COMMAND_BUFFER_SIZE];
     size_t length = 0;

@@ -36,7 +36,9 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(RP2040_Zero_Test main.c command_parser.c)
+add_executable(RP2040_Zero_Test main.c command_parser.c led_strip.c)
+
+pico_generate_pio_header(RP2040_Zero_Test ${CMAKE_CURRENT_LIST_DIR}/ws2812.pio)
 
 target_include_directories(RP2040_Zero_Test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/jsmn
@@ -54,6 +56,7 @@ target_link_libraries(RP2040_Zero_Test pico_stdlib)
 # Add any user requested libraries
 target_link_libraries(RP2040_Zero_Test
         hardware_adc
+        hardware_pio
         )
 
 pico_add_extra_outputs(RP2040_Zero_Test)
