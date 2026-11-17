@@ -59,16 +59,53 @@ static void handle_command(const char *text)
     // --------------------
     // command validation
     // --------------------
-    uint requested_source = 0;
-    uint requested_target = 0;
-    CommandType command = parse_command(text, CHANNEL_COUNT, &requested_source, &requested_target);
-    if (command == COMMAND_INVALID)
+    Command request;
+    if (!parse_command(text, CHANNEL_COUNT, LED_STRIP_COUNT, &request))
     {
         disable_injection();
         print_error("unknown", "invalid_command");
         return;
     }
-    bool scanning = command == COMMAND_SCAN_CONNECTIONS;
+    // --------------------
+    // LED commands
+    // --------------------
+    const char *led_command = NULL;
+    switch (request.type)
+    {
+        case COMMAND_SET_LED:
+            led_strip_set_pixel(request.index, request.r, request.g, request.b);
+            led_command = "set_led";
+            break;
+        case COMMAND_FILL_LEDS:
+            led_strip_fill(request.r, request.g, request.b);
+            led_command = "fill_leds";
+            break;
+        case COMMAND_CLEAR_LEDS:
+            led_strip_clear();
+            led_command = "clear_leds";
+            break;
+        case COMMAND_SET_BRIGHTNESS:
+            led_strip_set_brightness(request.brightness);
+            led_command = "set_brightness";
+            break;
+        default:
+            break;
+    }
+    if (led_command)
+    {
+        // Commands run sequentially; do not transmit LED frames during probing.
+        disable_injection();
+        led_strip_show();
+        printf("{\"type\":\"led_ack\",\"command\":\"%s\"", led_command);
+        if (request.type == COMMAND_SET_LED) printf(",\"index\":%u", request.index);
+        if (request.type == COMMAND_SET_BRIGHTNESS) printf(",\"brightness\":%u", (unsigned int)request.brightness);
+        puts("}");
+        return;
+    }
+
+    uint requested_source = request.source;
+    uint requested_target = request.target;
+    bool scanning = request.type == COMMAND_SCAN_CONNECTIONS;
     const char *command_name = scanning ? "scan_connections" : "probe";
     // Keep the 1 KiB matrix off the small default stack. A completed scan
     // overwrites every off-diagonal entry before classification.

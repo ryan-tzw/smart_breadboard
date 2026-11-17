@@ -43,7 +43,33 @@ led_strip_show();
 
 For the optional hardware self-test, change `LED_STRIP_SELF_TEST` in `led_strip.h` from 0 to 1, rebuild, and flash manually. On startup the first three LEDs show dim red, green, and blue for 300 ms, then all LEDs turn off and normal monitoring resumes. With fewer than three LEDs, out-of-range test indices are ignored. Restore the flag to 0 afterward. The test is disabled by default and adds no serial output.
 
-Physical colour order, signal timing, and latch behaviour still require verification with the strip. LED serial commands and browser controls are later milestones.
+Physical colour order, signal timing, and latch behaviour still require verification with the strip. USB serial LED commands are described below; browser LED controls remain Milestone 7.
+
+## LED serial commands (Milestone 6B)
+
+Close the browser serial connection and use the picocom command below. Send one JSON object per line, for example:
+
+```json
+{"type":"set_brightness","brightness":16}
+{"type":"set_led","index":3,"r":255,"g":0,"b":0}
+{"type":"fill_leds","r":0,"g":0,"b":255}
+{"type":"clear_leds"}
+```
+
+Indices are zero-based and must be below `LED_STRIP_COUNT` (0–99 by default). RGB and brightness values must be decimal integers from 0–255. Required fields can appear in any order. Duplicate, extra, missing, or invalid fields and malformed JSON are rejected without changing the LEDs. Brightness changes immediately retransmit the stored frame; brightness 0 does not erase its colours. Clear erases the colours but retains the brightness setting.
+
+Successful commands send one full frame and latch it before returning a JSON acknowledgement:
+
+```json
+{"type":"led_ack","command":"set_led","index":3}
+{"type":"led_ack","command":"fill_leds"}
+{"type":"led_ack","command":"clear_leds"}
+{"type":"led_ack","command":"set_brightness","brightness":16}
+```
+
+An invalid command returns `{"type":"error","command":"unknown","code":"invalid_command"}` without an acknowledgement. An acknowledgement confirms firmware execution, not physical LED feedback.
+
+LED commands execute sequentially outside active probing. Commands arriving during a connectivity scan wait until it finishes. Passive voltage monitoring continues between commands. The current web app has no LED controls or acknowledgement display; use a terminal until Milestone 7.
 
 ## Passive monitoring
 
@@ -65,7 +91,7 @@ Adjust the device path if needed. `--omap crlf` makes Enter send LF. Paste a com
 {"type":"probe","source":2,"target":5}
 ```
 
-The three fields may appear in any order, with JSON whitespace. Source and target must be distinct decimal integers from 0 to 15. Commands are tokenized by the vendored jsmn library in strict mode, with a fixed seven-token buffer and application validation. The interface accepts these literal field names and `"probe"`; escaped strings, extra or duplicate fields, fractional/exponent numbers, and trailing data are rejected. Lines may contain at most 127 bytes before LF. Oversized or invalid-byte lines are discarded through the next LF. No command executes before a newline is received.
+The three fields may appear in any order, with JSON whitespace. Source and target must be distinct decimal integers from 0 to 15. Commands are tokenized by the vendored jsmn library in strict mode, with a fixed eleven-token buffer and application validation shared by all commands. The interface accepts these literal field names and `"probe"`; escaped strings, extra or duplicate fields, fractional/exponent numbers, and trailing data are rejected. Lines may contain at most 127 bytes before LF. Oversized or invalid-byte lines are discarded through the next LF. No command executes before a newline is received.
 
 Each probe:
 

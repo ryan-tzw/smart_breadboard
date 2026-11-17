@@ -1,5 +1,6 @@
 #include "command_parser.h"
 
+#include <limits.h>
 #include <string.h>
 
 #define JSMN_STATIC
@@ -13,19 +14,22 @@ static bool token_matches(const char *text, const jsmntok_t *token, const char *
            strncmp(text + token->start, expected, length) == 0;
 }
 
-CommandType parse_command(const char *text, unsigned int channel_count,
-                         unsigned int *source_out, unsigned int *target_out)
+bool parse_command(const char *text, unsigned int channel_count,
+                   unsigned int led_count, Command *output)
 {
+    enum { TYPE, SOURCE, TARGET, INDEX, RED, GREEN, BLUE, BRIGHTNESS, FIELD_COUNT };
+    static const char *const field_names[FIELD_COUNT] = {
+        "type", "source", "target", "index", "r", "g", "b", "brightness"
+    };
+    unsigned int values[FIELD_COUNT] = {0};
+    Command parsed = {0};
     jsmn_parser parser;
-    jsmntok_t tokens[7]; // One object with either one or three key/value pairs.
+    jsmntok_t tokens[11]; // One object and at most five key/value pairs (set_led).
     size_t length = strlen(text);
     jsmn_init(&parser);
-    int count = jsmn_parse(&parser, text, length, tokens, 7);
-    unsigned int source = 0;
-    unsigned int target = 0;
+    int count = jsmn_parse(&parser, text, length, tokens, 11);
     unsigned int fields = 0;
-    CommandType command = COMMAND_INVALID;
-    bool valid = (count == 3 || count == 7) && tokens[0].type == JSMN_OBJECT &&
+    bool valid = count >= 3 && count % 2 == 1 && tokens[0].type == JSMN_OBJECT &&
                  tokens[0].size == (count - 1) / 2;
     int cursor = valid ? tokens[0].start + 1 : 0;
     if (valid && strspn(text, " \t\r\n") != (size_t)tokens[0].start)
@@ -71,66 +75,85 @@ CommandType parse_command(const char *text, unsigned int channel_count,
             break;
         }
 
-        unsigned int field;
-        if (token_matches(text, key, "type"))
-        {
-            field = 1;
-            if (token_matches(text, value, "probe"))
-            {
-                command = COMMAND_PROBE;
-            }
-            else if (token_matches(text, value, "scan_connections"))
-            {
-                command = COMMAND_SCAN_CONNECTIONS;
-            }
-            valid = command != COMMAND_INVALID;
-        }
-        else if (token_matches(text, key, "source") || token_matches(text, key, "target"))
-        {
-            field = token_matches(text, key, "source") ? 2 : 4;
-            int digits = value->end - value->start;
-            valid = value->type == JSMN_PRIMITIVE && digits >= 1 && digits <= 2;
-            unsigned int channel = 0;
-            for (int digit = value->start; valid && digit < value->end; ++digit)
-            {
-                char character = text[digit];
-                valid = character >= '0' && character <= '9';
-                if (valid)
-                {
-                    channel = channel * 10 + (unsigned int)(character - '0');
-                }
-            }
-            valid = valid && channel < channel_count &&
-                    !(digits > 1 && text[value->start] == '0');
-            if (field == 2)
-            {
-                source = channel;
-            }
-            else
-            {
-                target = channel;
-            }
-        }
-        else
+        unsigned int field = 0;
+        while (field < FIELD_COUNT && !token_matches(text, key, field_names[field])) ++field;
+        if (field == FIELD_COUNT || (fields & (1u << field)))
         {
             valid = false;
             break;
         }
-        valid = valid && (fields & field) == 0;
-        fields |= field;
-    }
-    bool valid_fields = (command == COMMAND_PROBE && fields == 7 && source != target) ||
-                        (command == COMMAND_SCAN_CONNECTIONS && fields == 1);
-    if (!valid || !valid_fields || cursor != tokens[0].end ||
-        (size_t)cursor + strspn(text + cursor, " \t\r\n") != length)
-    {
-        return COMMAND_INVALID;
+        if (field == TYPE)
+        {
+            if (token_matches(text, value, "probe")) parsed.type = COMMAND_PROBE;
+            else if (token_matches(text, value, "scan_connections")) parsed.type = COMMAND_SCAN_CONNECTIONS;
+            else if (token_matches(text, value, "set_led")) parsed.type = COMMAND_SET_LED;
+            else if (token_matches(text, value, "fill_leds")) parsed.type = COMMAND_FILL_LEDS;
+            else if (token_matches(text, value, "clear_leds")) parsed.type = COMMAND_CLEAR_LEDS;
+            else if (token_matches(text, value, "set_brightness")) parsed.type = COMMAND_SET_BRIGHTNESS;
+            valid = parsed.type != COMMAND_INVALID;
+        }
+        else
+        {
+            int digits = value->end - value->start;
+            valid = value->type == JSMN_PRIMITIVE && digits >= 1 &&
+                    !(digits > 1 && text[value->start] == '0');
+            unsigned int number = 0;
+            for (int digit = value->start; valid && digit < value->end; ++digit)
+            {
+                char character = text[digit];
+                if (character < '0' || character > '9' ||
+                    number > (UINT_MAX - (unsigned int)(character - '0')) / 10)
+                {
+                    valid = false;
+                    break;
+                }
+                number = number * 10 + (unsigned int)(character - '0');
+            }
+            if (field == SOURCE || field == TARGET) valid = valid && number < channel_count;
+            else if (field == INDEX) valid = valid && number < led_count;
+            else valid = valid && number <= 255;
+            values[field] = number;
+        }
+        fields |= 1u << field;
     }
 
-    if (command == COMMAND_PROBE)
+    unsigned int required = 1u << TYPE;
+    unsigned int rgb_fields = (1u << RED) | (1u << GREEN) | (1u << BLUE);
+    switch (parsed.type)
     {
-        *source_out = source;
-        *target_out = target;
+        case COMMAND_PROBE:
+            required |= (1u << SOURCE) | (1u << TARGET);
+            valid = valid && values[SOURCE] != values[TARGET];
+            break;
+        case COMMAND_SCAN_CONNECTIONS:
+        case COMMAND_CLEAR_LEDS:
+            break;
+        case COMMAND_SET_LED:
+            required |= (1u << INDEX) | rgb_fields;
+            break;
+        case COMMAND_FILL_LEDS:
+            required |= rgb_fields;
+            break;
+        case COMMAND_SET_BRIGHTNESS:
+            required |= 1u << BRIGHTNESS;
+            break;
+        default:
+            valid = false;
+            break;
     }
-    return command;
+    if (!valid || fields != required || cursor != tokens[0].end ||
+        (size_t)cursor + strspn(text + cursor, " \t\r\n") != length)
+    {
+        return false;
+    }
+
+    parsed.source = values[SOURCE];
+    parsed.target = values[TARGET];
+    parsed.index = values[INDEX];
+    parsed.r = (uint8_t)values[RED];
+    parsed.g = (uint8_t)values[GREEN];
+    parsed.b = (uint8_t)values[BLUE];
+    parsed.brightness = (uint8_t)values[BRIGHTNESS];
+    *output = parsed;
+    return true;
 }
