@@ -25,8 +25,7 @@ int main(void)
     while (true)
     {
         absolute_time_t next_scan = make_timeout_time_ms(1000);
-        puts("\nSmart breadboard scan (nominal 3.3 V ADC reference)");
-        puts("Channel  Raw ADC  Input voltage");
+        float voltages[16];
 
         for (uint channel = 0; channel < 16; ++channel)
         {
@@ -34,11 +33,15 @@ int main(void)
             sleep_ms(1);
             (void)adc_read(); // Discard the first conversion after switching.
             uint16_t raw = adc_read();
-            float input_voltage = raw * input_volts_per_count;
-
-            printf("%7u  %7u  %8.3f V\n", channel, (unsigned int)raw,
-                   input_voltage);
+            voltages[channel] = raw * input_volts_per_count;
         }
+
+        printf("{\"type\":\"voltage_scan\",\"voltages\":[");
+        for (uint channel = 0; channel < 16; ++channel)
+        {
+            printf("%s%.3f", channel == 0 ? "" : ",", voltages[channel]);
+        }
+        puts("]}");
 
         // Include settling and printing time in the one-second scan period.
         sleep_until(next_scan);
