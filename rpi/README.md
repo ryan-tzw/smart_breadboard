@@ -87,7 +87,7 @@ Progress messages contain `type: "scan_progress"`, `completed_sources` (0–16),
 - `ambiguous_groups`: candidate groups whose membership cannot be confirmed.
 - `ambiguous_pairs`: entries `[a, b, voltage_a_to_b, voltage_b_to_a]`, reporting intermediate/asymmetric pairs and missing pairwise detections within a candidate group.
 
-The compact pair arrays keep even a fully ambiguous 16-node result below the existing browser's 4096-character line limit. The Milestone 2 web app still handles only voltage scans; use a terminal for these commands. Browser scan controls and result display are Milestone 5.
+The compact pair arrays keep even a fully ambiguous 16-node result below the existing browser's 4096-character line limit. The web app supports scan commands, progress, and results through its Scan Connections button (Milestone 5). Individual probe commands remain available through a serial terminal.
 
 ## Manual verification
 
