@@ -15,6 +15,8 @@
 #define ADC_INPUT 0
 #define PROBE_MAX_PASSIVE_VOLTS 0.3f
 #define PROBE_TIMEOUT_MS 20
+#define CONNECTION_LOW_VOLTS 0.3f
+#define CONNECTION_HIGH_VOLTS 2.0f
 #define COMMAND_BUFFER_SIZE 128
 
 // Undo the 47 kohm / 68 kohm divider using a nominal 3.3 V reference.
@@ -46,9 +48,9 @@ static float measure_channel(uint channel)
     return adc_read() * input_volts_per_count;
 }
 
-static void print_error(const char *code)
+static void print_error(const char *command, const char *code)
 {
-    printf("{\"type\":\"error\",\"command\":\"probe\",\"code\":\"%s\"}\n", code);
+    printf("{\"type\":\"error\",\"command\":\"%s\",\"code\":\"%s\"}\n", command, code);
 }
 
 static void handle_command(const char *text)
@@ -56,76 +58,208 @@ static void handle_command(const char *text)
     // --------------------
     // command validation
     // --------------------
-    uint source;
-    uint target;
-    if (!parse_probe_command(text, CHANNEL_COUNT, &source, &target))
+    uint requested_source = 0;
+    uint requested_target = 0;
+    CommandType command = parse_command(text, CHANNEL_COUNT, &requested_source, &requested_target);
+    if (command == COMMAND_INVALID)
     {
         disable_injection();
-        print_error("invalid_command");
+        print_error("unknown", "invalid_command");
         return;
+    }
+    bool scanning = command == COMMAND_SCAN_CONNECTIONS;
+    const char *command_name = scanning ? "scan_connections" : "probe";
+    // Keep the 1 KiB matrix off the small default stack. A completed scan
+    // overwrites every off-diagonal entry before classification.
+    static float responses[CHANNEL_COUNT][CHANNEL_COUNT];
+    if (scanning)
+    {
+        printf("{\"type\":\"scan_progress\",\"completed_sources\":0,\"total_sources\":%u}\n", CHANNEL_COUNT);
+    }
+
+    for (uint source = scanning ? 0 : requested_source;
+         source < (scanning ? CHANNEL_COUNT : requested_source + 1); ++source)
+    {
+        // --------------------
+        // passive pre-check
+        // --------------------
+        disable_injection();
+        for (uint channel = 0; channel < CHANNEL_COUNT; ++channel)
+        {
+            float voltage = measure_channel(channel);
+            if (voltage > PROBE_MAX_PASSIVE_VOLTS)
+            {
+                printf("{\"type\":\"error\",\"command\":\"%s\",\"code\":\"unexpected_voltage\","
+                       "\"source\":%u,\"channel\":%u,\"voltage\":%.3f,\"threshold\":%.3f}\n",
+                       command_name, source, channel, voltage, (double)PROBE_MAX_PASSIVE_VOLTS);
+                return;
+            }
+        }
+
+        // --------------------
+        // signal injection
+        // --------------------
+        // MUX2 stays disabled while its source address changes.
+        gpio_put_masked(INJECTION_SELECT_MASK, source << 4);
+
+        // Arm and enable atomically so an alarm cannot be overridden by enable.
+        uint32_t interrupts = save_and_disable_interrupts();
+        probe_timed_out = false;
+        alarm_id_t alarm = add_alarm_in_ms(PROBE_TIMEOUT_MS, probe_timeout, NULL, true);
+        if (alarm > 0)
+        {
+            gpio_put(INJECTION_PIN, 1);
+            gpio_set_dir(INJECTION_PIN, GPIO_OUT);
+            gpio_put(INJECTION_ENABLE_PIN, 0);
+        }
+        restore_interrupts(interrupts);
+        if (alarm <= 0)
+        {
+            disable_injection();
+            print_error(command_name, "timer_unavailable");
+            return;
+        }
+
+        // --------------------
+        // measurement and cleanup
+        // --------------------
+        // A scan measures 15 targets per source, within the 20 ms cutoff.
+        // No USB printing or command parsing while injection is enabled.
+        for (uint target = scanning ? 0 : requested_target;
+             target < (scanning ? CHANNEL_COUNT : requested_target + 1); ++target)
+        {
+            if (source == target) continue;
+            responses[source][target] = measure_channel(target);
+            if (probe_timed_out) break;
+        }
+        disable_injection();
+        cancel_alarm(alarm);
+        if (probe_timed_out)
+        {
+            print_error(command_name, "probe_timeout");
+            return;
+        }
+        if (!scanning)
+        {
+            printf("{\"type\":\"probe_result\",\"source\":%u,\"target\":%u,\"voltage\":%.3f}\n",
+                   source, requested_target, responses[source][requested_target]);
+            return;
+        }
+        printf("{\"type\":\"scan_progress\",\"completed_sources\":%u,\"total_sources\":%u}\n",
+               source + 1, CHANNEL_COUNT);
     }
 
     // --------------------
-    // passive pre-check
+    // bidirectional classification
     // --------------------
-    float passive[CHANNEL_COUNT];
-    disable_injection();
-    for (uint channel = 0; channel < CHANNEL_COUNT; ++channel)
+    uint16_t connected[CHANNEL_COUNT] = {0};
+    uint16_t ambiguous[CHANNEL_COUNT] = {0};
+    for (uint a = 0; a < CHANNEL_COUNT; ++a)
     {
-        passive[channel] = measure_channel(channel);
-    }
-    for (uint channel = 0; channel < CHANNEL_COUNT; ++channel)
-    {
-        if (passive[channel] > PROBE_MAX_PASSIVE_VOLTS)
+        for (uint b = a + 1; b < CHANNEL_COUNT; ++b)
         {
-            printf("{\"type\":\"error\",\"command\":\"probe\",\"code\":\"unexpected_voltage\","
-                   "\"channel\":%u,\"voltage\":%.3f,\"threshold\":%.3f}\n",
-                   channel, passive[channel], (double)PROBE_MAX_PASSIVE_VOLTS);
-            return;
+            if (responses[a][b] >= CONNECTION_HIGH_VOLTS && responses[b][a] >= CONNECTION_HIGH_VOLTS)
+            {
+                connected[a] |= 1u << b;
+                connected[b] |= 1u << a;
+            }
+            else if (!(responses[a][b] <= CONNECTION_LOW_VOLTS && responses[b][a] <= CONNECTION_LOW_VOLTS))
+            {
+                // Includes intermediate voltages and asymmetric detection.
+                ambiguous[a] |= 1u << b;
+                ambiguous[b] |= 1u << a;
+            }
         }
     }
 
     // --------------------
-    // signal injection
+    // connected groups
     // --------------------
-
-    // MUX2 stays disabled while its source address changes.
-    gpio_put_masked(INJECTION_SELECT_MASK, source << 4);
-
-    // Arm the cutoff and enable injection atomically, so an alarm cannot fire
-    // before enable and then be accidentally overridden by the main loop.
-    uint32_t interrupts = save_and_disable_interrupts();
-    probe_timed_out = false;
-    alarm_id_t alarm = add_alarm_in_ms(PROBE_TIMEOUT_MS, probe_timeout, NULL, true);
-    if (alarm > 0)
+    uint16_t groups[CHANNEL_COUNT];
+    bool uncertain[CHANNEL_COUNT];
+    uint group_of[CHANNEL_COUNT];
+    uint group_count = 0;
+    uint16_t visited = 0;
+    for (uint start = 0; start < CHANNEL_COUNT; ++start)
     {
-        gpio_put(INJECTION_PIN, 1);
-        gpio_set_dir(INJECTION_PIN, GPIO_OUT);
-        gpio_put(INJECTION_ENABLE_PIN, 0);
-    }
-    restore_interrupts(interrupts);
-    if (alarm <= 0)
-    {
-        disable_injection();
-        print_error("timer_unavailable");
-        return;
+        if (visited & (1u << start)) continue;
+        uint16_t members = 1u << start;
+        uint16_t previous;
+        do
+        {
+            previous = members;
+            for (uint node = 0; node < CHANNEL_COUNT; ++node)
+            {
+                if (members & (1u << node)) members |= connected[node];
+            }
+        } while (members != previous);
+
+        groups[group_count] = members;
+        uncertain[group_count] = false;
+        for (uint node = 0; node < CHANNEL_COUNT; ++node)
+        {
+            if (!(members & (1u << node))) continue;
+            group_of[node] = group_count;
+            // Every pair in a confirmed group must agree. Any uncertain link,
+            // including one to an outside node, prevents confirming the group.
+            if (ambiguous[node] || (connected[node] & members) != (members & ~(1u << node)))
+            {
+                uncertain[group_count] = true;
+            }
+        }
+        visited |= members;
+        ++group_count;
     }
 
     // --------------------
-    // measurement and cleanup
+    // scan result
     // --------------------
-
-    // No USB printing or command parsing while injection is enabled.
-    float voltage = measure_channel(target);
-    disable_injection();
-    cancel_alarm(alarm);
-    if (probe_timed_out)
+    bool has_ambiguity = false;
+    for (uint group = 0; group < group_count; ++group)
     {
-        print_error("probe_timeout");
-        return;
+        has_ambiguity |= uncertain[group];
     }
-    printf("{\"type\":\"probe_result\",\"source\":%u,\"target\":%u,\"voltage\":%.3f}\n",
-           source, target, voltage);
+    printf("{\"type\":\"connection_scan\",\"status\":\"%s\",\"provisional\":true,"
+           "\"thresholds\":{\"low\":%.3f,\"high\":%.3f}",
+           has_ambiguity ? "ambiguous" : "complete",
+           (double)CONNECTION_LOW_VOLTS, (double)CONNECTION_HIGH_VOLTS);
+    for (uint category = 0; category < 2; ++category)
+    {
+        printf(category == 0 ? ",\"groups\":[" : ",\"ambiguous_groups\":[");
+        bool first_group = true;
+        for (uint group = 0; group < group_count; ++group)
+        {
+            if (uncertain[group] != (category == 1)) continue;
+            printf(first_group ? "[" : ",[");
+            first_group = false;
+            bool first_node = true;
+            for (uint node = 0; node < CHANNEL_COUNT; ++node)
+            {
+                if (!(groups[group] & (1u << node))) continue;
+                printf("%s%u", first_node ? "" : ",", node);
+                first_node = false;
+            }
+            printf("]");
+        }
+        printf("]");
+    }
+    printf(",\"ambiguous_pairs\":[");
+    bool first_pair = true;
+    for (uint a = 0; a < CHANNEL_COUNT; ++a)
+    {
+        for (uint b = a + 1; b < CHANNEL_COUNT; ++b)
+        {
+            bool contradiction = group_of[a] == group_of[b] && !(connected[a] & (1u << b));
+            if ((ambiguous[a] & (1u << b)) || contradiction)
+            {
+                // [a, b, voltage when injecting a, voltage when injecting b]
+                printf("%s[%u,%u,%.3f,%.3f]", first_pair ? "" : ",", a, b,
+                       responses[a][b], responses[b][a]);
+                first_pair = false;
+            }
+        }
+    }
+    puts("]}");
 }
 
 int main(void)
@@ -207,7 +341,7 @@ int main(void)
                     dropping_line = true;
                     length = 0;
                     disable_injection();
-                    print_error("invalid_command");
+                    print_error("unknown", "invalid_command");
                 }
                 else
                 {

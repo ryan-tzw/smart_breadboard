@@ -3,8 +3,14 @@
 
 #include <stdbool.h>
 
-// Returns false for invalid commands; output channels are only set on success.
-bool parse_probe_command(const char *text, unsigned int channel_count,
-                         unsigned int *source_out, unsigned int *target_out);
+typedef enum {
+    COMMAND_INVALID,
+    COMMAND_PROBE,
+    COMMAND_SCAN_CONNECTIONS
+} CommandType;
+
+// Output channels are only set for a valid probe command.
+CommandType parse_command(const char *text, unsigned int channel_count,
+                          unsigned int *source_out, unsigned int *target_out);
 
 #endif

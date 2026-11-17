@@ -13,18 +13,20 @@ static bool token_matches(const char *text, const jsmntok_t *token, const char *
            strncmp(text + token->start, expected, length) == 0;
 }
 
-bool parse_probe_command(const char *text, unsigned int channel_count,
+CommandType parse_command(const char *text, unsigned int channel_count,
                          unsigned int *source_out, unsigned int *target_out)
 {
     jsmn_parser parser;
-    jsmntok_t tokens[7]; // One object and exactly three key/value pairs.
+    jsmntok_t tokens[7]; // One object with either one or three key/value pairs.
     size_t length = strlen(text);
     jsmn_init(&parser);
     int count = jsmn_parse(&parser, text, length, tokens, 7);
     unsigned int source = 0;
     unsigned int target = 0;
     unsigned int fields = 0;
-    bool valid = count == 7 && tokens[0].type == JSMN_OBJECT && tokens[0].size == 3;
+    CommandType command = COMMAND_INVALID;
+    bool valid = (count == 3 || count == 7) && tokens[0].type == JSMN_OBJECT &&
+                 tokens[0].size == (count - 1) / 2;
     int cursor = valid ? tokens[0].start + 1 : 0;
     if (valid && strspn(text, " \t\r\n") != (size_t)tokens[0].start)
     {
@@ -63,7 +65,7 @@ bool parse_probe_command(const char *text, unsigned int channel_count,
         }
         cursor = value->end + (value->type == JSMN_STRING ? 1 : 0);
         cursor += (int)strspn(text + cursor, " \t\r\n");
-        if (text[cursor++] != (index == 5 ? '}' : ','))
+        if (text[cursor++] != (index == count - 2 ? '}' : ','))
         {
             valid = false;
             break;
@@ -73,7 +75,15 @@ bool parse_probe_command(const char *text, unsigned int channel_count,
         if (token_matches(text, key, "type"))
         {
             field = 1;
-            valid = token_matches(text, value, "probe");
+            if (token_matches(text, value, "probe"))
+            {
+                command = COMMAND_PROBE;
+            }
+            else if (token_matches(text, value, "scan_connections"))
+            {
+                command = COMMAND_SCAN_CONNECTIONS;
+            }
+            valid = command != COMMAND_INVALID;
         }
         else if (token_matches(text, key, "source") || token_matches(text, key, "target"))
         {
@@ -109,13 +119,18 @@ bool parse_probe_command(const char *text, unsigned int channel_count,
         valid = valid && (fields & field) == 0;
         fields |= field;
     }
-    if (!valid || fields != 7 || source == target || cursor != tokens[0].end ||
+    bool valid_fields = (command == COMMAND_PROBE && fields == 7 && source != target) ||
+                        (command == COMMAND_SCAN_CONNECTIONS && fields == 1);
+    if (!valid || !valid_fields || cursor != tokens[0].end ||
         (size_t)cursor + strspn(text + cursor, " \t\r\n") != length)
     {
-        return false;
+        return COMMAND_INVALID;
     }
 
-    *source_out = source;
-    *target_out = target;
-    return true;
+    if (command == COMMAND_PROBE)
+    {
+        *source_out = source;
+        *target_out = target;
+    }
+    return command;
 }
