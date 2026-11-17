@@ -43,7 +43,7 @@ led_strip_show();
 
 For the optional hardware self-test, change `LED_STRIP_SELF_TEST` in `led_strip.h` from 0 to 1, rebuild, and flash manually. On startup the first three LEDs show dim red, green, and blue for 300 ms, then all LEDs turn off and normal monitoring resumes. With fewer than three LEDs, out-of-range test indices are ignored. Restore the flag to 0 afterward. The test is disabled by default and adds no serial output.
 
-Physical colour order, signal timing, and latch behaviour still require verification with the strip. USB serial LED commands are described below; browser LED controls remain Milestone 7.
+Physical colour order, signal timing, and latch behaviour still require verification with the strip. USB serial LED commands are described below; the web app provides an LED Control section (Milestone 7).
 
 ## LED serial commands (Milestone 6B)
 
@@ -69,7 +69,7 @@ Successful commands send one full frame and latch it before returning a JSON ack
 
 An invalid command returns `{"type":"error","command":"unknown","code":"invalid_command"}` without an acknowledgement. An acknowledgement confirms firmware execution, not physical LED feedback.
 
-LED commands execute sequentially outside active probing. Commands arriving during a connectivity scan wait until it finishes. Passive voltage monitoring continues between commands. The current web app has no LED controls or acknowledgement display; use a terminal until Milestone 7.
+LED commands execute sequentially outside active probing. Commands arriving during a connectivity scan wait until it finishes. Passive voltage monitoring continues between commands. The web app provides LED controls and acknowledgement/error display over the same connection (Milestone 7), with conflicting actions disabled while a command or connectivity scan is pending.
 
 ## Passive monitoring
 

@@ -1,47 +1,79 @@
-import { useEffect, useRef, useState } from 'react'
-import { getSerialApi, VoltageMonitor } from './serial'
-import type { ConnectionState, ScanState } from './serial'
-import './App.css'
+import { useEffect, useRef, useState } from "react";
+import { getSerialApi, LED_COUNT, VoltageMonitor } from "./serial";
+import type { ConnectionState, LedCommand, LedState, ScanState } from "./serial";
+import "./App.css";
 
 function App() {
-  const [state, setState] = useState<ConnectionState>('disconnected')
-  const [voltages, setVoltages] = useState<number[] | null>(null)
-  const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
-  const [error, setError] = useState('')
-  const [scan, setScan] = useState<ScanState>({ status: 'idle' })
-  const scanning = scan.status === 'scanning'
-  const monitor = useRef<VoltageMonitor | null>(null)
-  const supported = Boolean(getSerialApi())
+  const [state, setState] = useState<ConnectionState>("disconnected");
+  const [voltages, setVoltages] = useState<number[] | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const [error, setError] = useState("");
+  const [scan, setScan] = useState<ScanState>({ status: "idle" });
+  const scanning = scan.status === "scanning";
+  const [led, setLed] = useState<LedState>({ status: "idle" });
+  const [ledIndex, setLedIndex] = useState("0");
+  const [colour, setColour] = useState("#ff0000");
+  const [brightness, setBrightness] = useState(255);
+  const ledPending = led.status === "pending";
+  const busy = scanning || ledPending;
+  const monitor = useRef<VoltageMonitor | null>(null);
+  const supported = Boolean(getSerialApi());
 
   useEffect(() => {
-    const serial = getSerialApi()
-    if (!serial) return
-    let active = true
+    const serial = getSerialApi();
+    if (!serial) return;
+    let active = true;
     const connection = new VoltageMonitor(
       serial,
-      (nextState) => { if (active) setState(nextState) },
-      (values) => {
-        if (!active) return
-        setVoltages(values)
-        setUpdatedAt(new Date())
+      (nextState) => {
+        if (active) setState(nextState);
       },
-      (message) => { if (active) setError(message) },
-      (nextScan) => { if (active) setScan(nextScan) },
-    )
-    monitor.current = connection
+      (values) => {
+        if (!active) return;
+        setVoltages(values);
+        setUpdatedAt(new Date());
+      },
+      (message) => {
+        if (active) setError(message);
+      },
+      (nextScan) => {
+        if (active) setScan(nextScan);
+      },
+      (nextLed) => {
+        if (active) setLed(nextLed);
+      },
+    );
+    monitor.current = connection;
     return () => {
-      active = false
-      monitor.current = null
-      void connection.disconnect()
-    }
-  }, [])
+      active = false;
+      monitor.current = null;
+      void connection.disconnect();
+    };
+  }, []);
 
   function connect() {
-    setError('')
-    setScan({ status: 'idle' })
-    setVoltages(null)
-    setUpdatedAt(null)
-    void monitor.current?.connect()
+    setError("");
+    setScan({ status: "idle" });
+    setLed({ status: "idle" });
+    setVoltages(null);
+    setUpdatedAt(null);
+    void monitor.current?.connect();
+  }
+
+  function sendLed(action: LedCommand["type"]) {
+    setError("");
+    const rgb = {
+      r: parseInt(colour.slice(1, 3), 16),
+      g: parseInt(colour.slice(3, 5), 16),
+      b: parseInt(colour.slice(5, 7), 16),
+    };
+    let command: LedCommand;
+    if (action === "set_led")
+      command = { type: action, index: ledIndex === "" ? NaN : Number(ledIndex), ...rgb };
+    else if (action === "fill_leds") command = { type: action, ...rgb };
+    else if (action === "set_brightness") command = { type: action, brightness };
+    else command = { type: "clear_leds" };
+    void monitor.current?.sendLedCommand(command);
   }
 
   return (
@@ -50,75 +82,215 @@ function App() {
       <p>Live voltage readings from 16 breadboard nodes.</p>
       <section className="connection" aria-label="Serial connection">
         <div className="controls">
-          <button onClick={connect} disabled={!supported || state !== 'disconnected'}>Connect</button>
-          <button onClick={() => void monitor.current?.disconnect()} disabled={state !== 'connected' || scanning}>Disconnect</button>
+          <button onClick={connect} disabled={!supported || state !== "disconnected"}>
+            Connect
+          </button>
+          <button
+            onClick={() => void monitor.current?.disconnect()}
+            disabled={state !== "connected" || busy}
+          >
+            Disconnect
+          </button>
         </div>
-        <p role="status">Status: {supported ? state : 'Web Serial unavailable'}</p>
+        <p role="status">Status: {supported ? state : "Web Serial unavailable"}</p>
         {!supported && <p>Open this page in Chrome or Edge on localhost to use Web Serial.</p>}
-        {error && <p className="error" role="alert">{error}</p>}
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
       </section>
       <section className="connectivity" aria-labelledby="connectivity-title" aria-busy={scanning}>
         <h2 id="connectivity-title">Connectivity</h2>
-        <p className="note">Scan only known, externally unpowered circuits. Results are provisional connectivity indications.</p>
+        <p className="note">
+          Scan only known, externally unpowered circuits. Results are provisional connectivity
+          indications.
+        </p>
         <button
-          disabled={state !== 'connected' || scanning}
+          disabled={state !== "connected" || busy}
           onClick={() => {
-            setError('')
-            void monitor.current?.scanConnections()
+            setError("");
+            void monitor.current?.scanConnections();
           }}
-        >Scan Connections</button>
-        {scan.status === 'idle' && <p role="status">No connectivity scan yet.</p>}
-        {scan.status === 'scanning' && <>
-          <p role="status">Scanning: {scan.completedSources} / 16 sources measured.</p>
-          <progress max={16} value={scan.completedSources} aria-label="Connectivity scan progress" />
-        </>}
-        {scan.status === 'error' && <p className="error" role="alert">{scan.message}</p>}
-        {scan.status === 'complete' && <>
-          <p role="status">
-            {scan.result.status === 'ambiguous' ? 'Scan completed with ambiguous results.' : 'Scan completed.'}
-            {state !== 'connected' && ' Disconnected; showing the last result.'}
+        >
+          Scan Connections
+        </button>
+        {scan.status === "idle" && <p role="status">No connectivity scan yet.</p>}
+        {scan.status === "scanning" && (
+          <>
+            <p role="status">Scanning: {scan.completedSources} / 16 sources measured.</p>
+            <progress
+              max={16}
+              value={scan.completedSources}
+              aria-label="Connectivity scan progress"
+            />
+          </>
+        )}
+        {scan.status === "error" && (
+          <p className="error" role="alert">
+            {scan.message}
           </p>
-          <h3>Detected groups</h3>
-          {scan.result.groups.length === 0 ? <p>No groups could be confirmed.</p> : <ul>
-            {scan.result.groups.map((group) => <li key={group.join('-')}>
-              {group.length === 1 ? `Channel ${group[0]}: no connection detected` : `Channels ${group.join(', ')}`}
-            </li>)}
-          </ul>}
-          {scan.result.ambiguous_groups.length > 0 && <>
-            <h3>Uncertain groups</h3>
-            <p>These candidate groups have uncertain or conflicting measurements.</p>
-            <ul>{scan.result.ambiguous_groups.map((group) => <li key={group.join('-')}>Channels {group.join(', ')}</li>)}</ul>
-          </>}
-          {scan.result.ambiguous_pairs.length > 0 && <div className="pair-results">
-            <table>
-              <caption>Ambiguous pairs</caption>
-              <thead><tr><th scope="col">Channels A / B</th><th scope="col">A → B</th><th scope="col">B → A</th></tr></thead>
-              <tbody>{scan.result.ambiguous_pairs.map(([a, b, forward, reverse]) => <tr key={`${a}-${b}`}>
-                <th scope="row">{a} / {b}</th><td>{forward.toFixed(3)} V</td><td>{reverse.toFixed(3)} V</td>
-              </tr>)}</tbody>
-            </table>
-          </div>}
-          <p className="note">Detection requires at least {scan.result.thresholds.high.toFixed(3)} V in both directions. Readings at or below {scan.result.thresholds.low.toFixed(3)} V indicate no detected connection.</p>
-        </>}
+        )}
+        {scan.status === "complete" && (
+          <>
+            <p role="status">
+              {scan.result.status === "ambiguous"
+                ? "Scan completed with ambiguous results."
+                : "Scan completed."}
+              {state !== "connected" && " Disconnected; showing the last result."}
+            </p>
+            <h3>Detected groups</h3>
+            {scan.result.groups.length === 0 ? (
+              <p>No groups could be confirmed.</p>
+            ) : (
+              <ul>
+                {scan.result.groups.map((group) => (
+                  <li key={group.join("-")}>
+                    {group.length === 1
+                      ? `Channel ${group[0]}: no connection detected`
+                      : `Channels ${group.join(", ")}`}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {scan.result.ambiguous_groups.length > 0 && (
+              <>
+                <h3>Uncertain groups</h3>
+                <p>These candidate groups have uncertain or conflicting measurements.</p>
+                <ul>
+                  {scan.result.ambiguous_groups.map((group) => (
+                    <li key={group.join("-")}>Channels {group.join(", ")}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {scan.result.ambiguous_pairs.length > 0 && (
+              <div className="pair-results">
+                <table>
+                  <caption>Ambiguous pairs</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Channels A / B</th>
+                      <th scope="col">A → B</th>
+                      <th scope="col">B → A</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scan.result.ambiguous_pairs.map(([a, b, forward, reverse]) => (
+                      <tr key={`${a}-${b}`}>
+                        <th scope="row">
+                          {a} / {b}
+                        </th>
+                        <td>{forward.toFixed(3)} V</td>
+                        <td>{reverse.toFixed(3)} V</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="note">
+              Detection requires at least {scan.result.thresholds.high.toFixed(3)} V in both
+              directions. Readings at or below {scan.result.thresholds.low.toFixed(3)} V indicate no
+              detected connection.
+            </p>
+          </>
+        )}
+      </section>
+      <section className="led-control" aria-labelledby="led-title" aria-busy={ledPending}>
+        <h2 id="led-title">Manual LED Control</h2>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            sendLed("set_led");
+          }}
+        >
+          <fieldset className="led-fields" disabled={state !== "connected" || busy}>
+            <label>
+              LED index (0–{LED_COUNT - 1})
+              <input
+                type="number"
+                min={0}
+                max={LED_COUNT - 1}
+                step={1}
+                required
+                value={ledIndex}
+                onChange={(event) => setLedIndex(event.currentTarget.value)}
+              />
+            </label>
+            <label>
+              Colour
+              <input
+                type="color"
+                value={colour}
+                onChange={(event) => setColour(event.currentTarget.value)}
+              />
+              <span>{colour.toUpperCase()}</span>
+            </label>
+            <label>
+              <span>Brightness to apply: <span className="brightness-value">{brightness}</span></span>
+              <input
+                type="range"
+                min={0}
+                max={255}
+                step={1}
+                value={brightness}
+                onChange={(event) => setBrightness(event.currentTarget.valueAsNumber)}
+              />
+            </label>
+            <div className="controls">
+              <button type="submit">Set Selected LED</button>
+              <button type="button" onClick={() => sendLed("fill_leds")}>
+                Apply Colour to All
+              </button>
+              <button type="button" onClick={() => sendLed("set_brightness")}>
+                Apply Brightness
+              </button>
+              <button type="button" onClick={() => sendLed("clear_leds")}>
+                Clear All LEDs
+              </button>
+            </div>
+          </fieldset>
+        </form>
+        {led.status === "idle" && <p role="status">No LED command sent yet.</p>}
+        {led.status === "pending" && <p role="status">Waiting for LED acknowledgement…</p>}
+        {led.status === "error" && (
+          <p className="error" role="alert">
+            {led.message}
+          </p>
+        )}
+        {led.status === "success" && (
+          <p role="status">
+            {led.message}
+            {state !== "connected" && " Disconnected; showing the last acknowledgement."}
+          </p>
+        )}
       </section>
       <p className="updated">
-        {updatedAt ? `Last scan: ${updatedAt.toLocaleTimeString()}${state !== 'connected' ? ' (disconnected; readings retained)' : ''}` : 'Waiting for a voltage scan.'}
+        {updatedAt
+          ? `Last scan: ${updatedAt.toLocaleTimeString()}${state !== "connected" ? " (disconnected; readings retained)" : ""}`
+          : "Waiting for a voltage scan."}
       </p>
       <table>
         <caption>Node voltages</caption>
-        <thead><tr><th scope="col">Channel</th><th scope="col">Voltage</th></tr></thead>
+        <thead>
+          <tr>
+            <th scope="col">Channel</th>
+            <th scope="col">Voltage</th>
+          </tr>
+        </thead>
         <tbody>
           {Array.from({ length: 16 }, (_, channel) => (
             <tr key={channel}>
               <th scope="row">{channel}</th>
-              <td>{voltages ? `${voltages[channel].toFixed(3)} V` : '—'}</td>
+              <td>{voltages ? `${voltages[channel].toFixed(3)} V` : "—"}</td>
             </tr>
           ))}
         </tbody>
       </table>
       <p className="note">Floating nodes can show arbitrary readings.</p>
     </main>
-  )
+  );
 }
 
-export default App
+export default App;

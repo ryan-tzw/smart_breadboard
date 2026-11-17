@@ -32,7 +32,26 @@ export type ScanState =
   | { status: 'complete'; result: ConnectionResult }
   | { status: 'error'; message: string }
 
+export const LED_COUNT = 100
+
+export type LedCommand =
+  | { type: 'set_led'; index: number; r: number; g: number; b: number }
+  | { type: 'fill_leds'; r: number; g: number; b: number }
+  | { type: 'clear_leds' }
+  | { type: 'set_brightness'; brightness: number }
+
+export type LedState =
+  | { status: 'idle' }
+  | { status: 'pending' }
+  | { status: 'success' | 'error'; message: string }
+
+type LedAck =
+  | { type: 'led_ack'; command: 'set_led'; index: number }
+  | { type: 'led_ack'; command: 'fill_leds' | 'clear_leds' }
+  | { type: 'led_ack'; command: 'set_brightness'; brightness: number }
+
 type DeviceMessage =
+  | LedAck
   | { type: 'voltage_scan'; voltages: number[] }
   | { type: 'scan_progress'; completed_sources: number; total_sources: number }
   | ConnectionResult
@@ -44,6 +63,14 @@ function finite(value: unknown): value is number {
 
 function channel(value: unknown): value is number {
   return finite(value) && Number.isInteger(value) && value >= 0 && value < 16
+}
+
+function byte(value: unknown): value is number {
+  return finite(value) && Number.isInteger(value) && value >= 0 && value <= 255
+}
+
+function ledIndex(value: unknown): value is number {
+  return finite(value) && Number.isInteger(value) && value >= 0 && value < LED_COUNT
 }
 
 export function parseDeviceMessage(line: string): DeviceMessage {
@@ -90,6 +117,11 @@ export function parseDeviceMessage(line: string): DeviceMessage {
       if ((message.status === 'ambiguous') !== ambiguous) throw new Error('Inconsistent scan status.')
       break
     }
+    case 'led_ack':
+      if ((message.command === 'set_led' && ledIndex(message.index)) ||
+          (message.command === 'set_brightness' && byte(message.brightness)) ||
+          message.command === 'fill_leds' || message.command === 'clear_leds') break
+      throw new Error('Invalid LED acknowledgement.')
     case 'error':
       if (typeof message.command !== 'string' || typeof message.code !== 'string' ||
           (message.channel !== undefined && !channel(message.channel)) ||
@@ -111,6 +143,9 @@ export class VoltageMonitor {
   private state: ConnectionState = 'disconnected'
   private port: SerialPort | undefined
   private writer: WritableStreamDefaultWriter<Uint8Array> | undefined
+  private ledPending: LedCommand | undefined
+  private ledTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly onLed: (state: LedState) => void
   private scanPending = false
   private scanTimer: ReturnType<typeof setTimeout> | undefined
   private readonly onConnectionScan: (state: ScanState) => void
@@ -129,12 +164,14 @@ export class VoltageMonitor {
     onScan: (voltages: number[]) => void,
     onError: (message: string) => void,
     onConnectionScan: (state: ScanState) => void = () => {},
+    onLed: (state: LedState) => void = () => {},
   ) {
     this.serial = serial
     this.onState = onState
     this.onScan = onScan
     this.onError = onError
     this.onConnectionScan = onConnectionScan
+    this.onLed = onLed
   }
 
   private setState(state: ConnectionState) {
@@ -179,6 +216,7 @@ export class VoltageMonitor {
   private async closePort(port: SerialPort) {
     this.port = undefined
     if (this.scanPending) this.updateScan({ status: 'error', message: 'Connection closed before the scan completed.' })
+    if (this.ledPending) this.updateLed({ status: 'error', message: 'Connection closed before the LED command was acknowledged.' })
     const writer = this.writer
     if (writer) {
       try { await writer.abort() } catch { /* The device may already be gone. */ }
@@ -227,6 +265,18 @@ export class VoltageMonitor {
               this.updateScan({ status: 'scanning', completedSources: message.completed_sources })
             } else if (message.type === 'connection_scan') {
               this.updateScan({ status: 'complete', result: message })
+            } else if (message.type === 'led_ack') {
+              const pending = this.ledPending
+              if (!pending || pending.type !== message.command ||
+                  (message.command === 'set_led' && pending.type === 'set_led' && message.index !== pending.index) ||
+                  (message.command === 'set_brightness' && pending.type === 'set_brightness' && message.brightness !== pending.brightness)) {
+                throw new Error('Unexpected LED acknowledgement.')
+              }
+              let detail = 'All LEDs updated.'
+              if (message.command === 'set_led') detail = `LED ${message.index} updated.`
+              else if (message.command === 'clear_leds') detail = 'All LEDs cleared.'
+              else if (message.command === 'set_brightness') detail = `Brightness set to ${message.brightness}.`
+              this.updateLed({ status: 'success', message: detail })
             } else {
               let detail = `Device error: ${message.code}.`
               if (message.code === 'unexpected_voltage') {
@@ -240,6 +290,8 @@ export class VoltageMonitor {
               }
               if (this.scanPending && (message.command === 'scan_connections' || message.command === 'unknown')) {
                 this.updateScan({ status: 'error', message: detail })
+              } else if (this.ledPending && (message.command === this.ledPending.type || message.command === 'unknown')) {
+                this.updateLed({ status: 'error', message: detail })
               } else {
                 this.onError(detail)
               }
@@ -282,16 +334,55 @@ export class VoltageMonitor {
       this.onError('Connect to a writable serial port before scanning.')
       return
     }
-    if (this.scanPending || this.writer) return
+    if (this.scanPending || this.ledPending || this.writer) return
     this.updateScan({ status: 'scanning', completedSources: 0 })
+    await this.writeCommand({ type: 'scan_connections' })
+  }
+
+  private updateLed(state: LedState) {
+    clearTimeout(this.ledTimer)
+    if (state.status !== 'pending') this.ledPending = undefined
+    else {
+      this.ledTimer = setTimeout(() => {
+        this.updateLed({ status: 'error', message: 'LED acknowledgement timed out. Reconnect before retrying.' })
+        void this.disconnect()
+      }, 10000)
+    }
+    this.onLed(state)
+  }
+
+  async sendLedCommand(command: LedCommand) {
+    if (this.state !== 'connected' || this.stopping || !this.port?.writable) {
+      this.updateLed({ status: 'error', message: 'Connect to a writable serial port before controlling LEDs.' })
+      return
+    }
+    if (this.scanPending || this.ledPending || this.writer) return
+    const valid = command.type === 'clear_leds' ||
+      (command.type === 'set_brightness' && byte(command.brightness)) ||
+      ((command.type === 'set_led' || command.type === 'fill_leds') &&
+        byte(command.r) && byte(command.g) && byte(command.b) &&
+        (command.type !== 'set_led' || ledIndex(command.index)))
+    if (!valid) {
+      this.updateLed({ status: 'error', message: 'Invalid LED index, colour, or brightness.' })
+      return
+    }
+    this.ledPending = { ...command }
+    this.updateLed({ status: 'pending' })
+    await this.writeCommand(command)
+  }
+
+  private async writeCommand(command: LedCommand | { type: 'scan_connections' }) {
     let writer: WritableStreamDefaultWriter<Uint8Array> | undefined
     try {
+      if (!this.port?.writable) throw new Error('Serial port unavailable.')
       writer = this.port.writable.getWriter()
       this.writer = writer
-      await writer.write(new TextEncoder().encode('{"type":"scan_connections"}\n'))
+      await writer.write(new TextEncoder().encode(JSON.stringify(command) + '\n'))
     } catch (error) {
       if (!this.stopping) {
-        this.updateScan({ status: 'error', message: `Could not send scan command: ${String(error)}` })
+        const failure = { status: 'error' as const, message: `Could not send ${command.type} command: ${String(error)}` }
+        if (command.type === 'scan_connections') this.updateScan(failure)
+        else this.updateLed(failure)
         // A failed write may have been partially delivered; reconnect before retrying.
         void this.disconnect()
       }
