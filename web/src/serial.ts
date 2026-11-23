@@ -32,7 +32,13 @@ export type ScanState =
   | { status: 'complete'; result: ConnectionResult }
   | { status: 'error'; message: string }
 
-export const LED_COUNT = 100
+export const CHANNEL_COUNT = 15
+export const LED_COUNT = 15
+const MAX_PAIRS = CHANNEL_COUNT * (CHANNEL_COUNT - 1) / 2
+
+type ProbeCommand = { type: 'probe'; source: number; target: number }
+type ProbeResult = { type: 'probe_result'; source: number; target: number; voltage: number }
+type ProbeOutcome = ProbeResult | { error: string }
 
 export type LedCommand =
   | { type: 'set_led'; index: number; r: number; g: number; b: number }
@@ -52,6 +58,7 @@ type LedAck =
 
 type DeviceMessage =
   | LedAck
+  | ProbeResult
   | { type: 'voltage_scan'; voltages: number[] }
   | { type: 'scan_progress'; completed_sources: number; total_sources: number }
   | ConnectionResult
@@ -62,7 +69,7 @@ function finite(value: unknown): value is number {
 }
 
 function channel(value: unknown): value is number {
-  return finite(value) && Number.isInteger(value) && value >= 0 && value < 16
+  return finite(value) && Number.isInteger(value) && value >= 0 && value < CHANNEL_COUNT
 }
 
 function byte(value: unknown): value is number {
@@ -79,13 +86,13 @@ export function parseDeviceMessage(line: string): DeviceMessage {
   const message = parsed as Record<string, unknown>
   switch (message.type) {
     case 'voltage_scan':
-      if (!Array.isArray(message.voltages) || message.voltages.length !== 16 ||
-          !message.voltages.every(finite)) throw new Error('Expected 16 finite voltages.')
+      if (!Array.isArray(message.voltages) || message.voltages.length !== CHANNEL_COUNT ||
+          !message.voltages.every(finite)) throw new Error(`Expected ${CHANNEL_COUNT} finite voltages. Check that the board has the 15-node firmware.`)
       break
     case 'scan_progress':
-      if (message.total_sources !== 16 || !finite(message.completed_sources) ||
+      if (message.total_sources !== CHANNEL_COUNT || !finite(message.completed_sources) ||
           !Number.isInteger(message.completed_sources) || message.completed_sources < 0 ||
-          message.completed_sources > 16) throw new Error('Invalid connectivity scan progress.')
+          message.completed_sources > CHANNEL_COUNT) throw new Error('Invalid connectivity scan progress.')
       break
     case 'connection_scan': {
       const thresholds = message.thresholds as Record<string, unknown> | null
@@ -93,18 +100,18 @@ export function parseDeviceMessage(line: string): DeviceMessage {
           typeof thresholds !== 'object' || thresholds === null || !finite(thresholds.low) ||
           !finite(thresholds.high) || thresholds.low < 0 || thresholds.high <= thresholds.low ||
           !Array.isArray(message.groups) || !Array.isArray(message.ambiguous_groups) ||
-          !Array.isArray(message.ambiguous_pairs) || message.ambiguous_pairs.length > 120) {
+          !Array.isArray(message.ambiguous_pairs) || message.ambiguous_pairs.length > MAX_PAIRS) {
         throw new Error('Invalid connectivity scan result.')
       }
       const seen = new Set<number>()
       for (const group of [...message.groups, ...message.ambiguous_groups]) {
-        if (!Array.isArray(group) || group.length === 0 || group.length > 16) throw new Error('Invalid node group.')
+        if (!Array.isArray(group) || group.length === 0 || group.length > CHANNEL_COUNT) throw new Error('Invalid node group.')
         for (const node of group) {
           if (!channel(node) || seen.has(node)) throw new Error('Invalid or repeated channel in scan result.')
           seen.add(node)
         }
       }
-      if (seen.size !== 16) throw new Error('Scan result must account for all 16 channels.')
+      if (seen.size !== CHANNEL_COUNT) throw new Error(`Scan result must account for all ${CHANNEL_COUNT} channels.`)
       const pairs = new Set<string>()
       for (const pair of message.ambiguous_pairs) {
         if (!Array.isArray(pair) || pair.length !== 4 || !channel(pair[0]) || !channel(pair[1]) ||
@@ -117,6 +124,10 @@ export function parseDeviceMessage(line: string): DeviceMessage {
       if ((message.status === 'ambiguous') !== ambiguous) throw new Error('Inconsistent scan status.')
       break
     }
+    case 'probe_result':
+      if (!channel(message.source) || !channel(message.target) || message.source === message.target ||
+          !finite(message.voltage) || message.voltage < 0) throw new Error('Invalid probe result.')
+      break
     case 'led_ack':
       if ((message.command === 'set_led' && ledIndex(message.index)) ||
           (message.command === 'set_brightness' && byte(message.brightness)) ||
@@ -146,6 +157,9 @@ export class VoltageMonitor {
   private ledPending: LedCommand | undefined
   private ledTimer: ReturnType<typeof setTimeout> | undefined
   private readonly onLed: (state: LedState) => void
+  private finishScan: ((state: ScanState) => void) | undefined
+  private finishLed: ((state: LedState) => void) | undefined
+  private probe: { command: ProbeCommand; resolve: (result: ProbeOutcome) => void; timer: ReturnType<typeof setTimeout> } | undefined
   private scanPending = false
   private scanTimer: ReturnType<typeof setTimeout> | undefined
   private readonly onConnectionScan: (state: ScanState) => void
@@ -215,6 +229,7 @@ export class VoltageMonitor {
 
   private async closePort(port: SerialPort) {
     this.port = undefined
+    this.finishProbe({ error: 'Connection closed before the probe completed.' })
     if (this.scanPending) this.updateScan({ status: 'error', message: 'Connection closed before the scan completed.' })
     if (this.ledPending) this.updateLed({ status: 'error', message: 'Connection closed before the LED command was acknowledged.' })
     const writer = this.writer
@@ -262,9 +277,12 @@ export class VoltageMonitor {
             if (message.type === 'voltage_scan') {
               this.onScan(message.voltages)
             } else if (message.type === 'scan_progress') {
-              this.updateScan({ status: 'scanning', completedSources: message.completed_sources })
+              if (this.scanPending) this.updateScan({ status: 'scanning', completedSources: message.completed_sources })
             } else if (message.type === 'connection_scan') {
-              this.updateScan({ status: 'complete', result: message })
+              if (this.scanPending) this.updateScan({ status: 'complete', result: message })
+            } else if (message.type === 'probe_result') {
+              const command = this.probe?.command
+              if (command?.source === message.source && command.target === message.target) this.finishProbe(message)
             } else if (message.type === 'led_ack') {
               const pending = this.ledPending
               if (!pending || pending.type !== message.command ||
@@ -281,15 +299,17 @@ export class VoltageMonitor {
               let detail = `Device error: ${message.code}.`
               if (message.code === 'unexpected_voltage') {
                 detail = message.channel !== undefined && message.voltage !== undefined
-                  ? `Scan refused: channel ${message.channel} measured ${message.voltage.toFixed(3)} V. Disconnect external circuit power before scanning.`
-                  : 'Scan refused: unexpected voltage detected.'
+                  ? `Active check refused: channel ${message.channel} measured ${message.voltage.toFixed(3)} V. Disconnect external circuit power before checking.`
+                  : 'Active check refused: unexpected voltage detected.'
               } else if (message.code === 'probe_timeout') {
-                detail = 'Scan stopped: the firmware injection cutoff was reached.'
+                detail = 'Active check stopped: the firmware injection cutoff was reached.'
               } else if (message.code === 'timer_unavailable') {
-                detail = 'Scan refused: the firmware could not arm the injection cutoff.'
+                detail = 'Active check refused: the firmware could not arm the injection cutoff.'
               }
               if (this.scanPending && (message.command === 'scan_connections' || message.command === 'unknown')) {
                 this.updateScan({ status: 'error', message: detail })
+              } else if (this.probe && (message.command === 'probe' || message.command === 'unknown')) {
+                this.finishProbe({ error: detail })
               } else if (this.ledPending && (message.command === this.ledPending.type || message.command === 'unknown')) {
                 this.updateLed({ status: 'error', message: detail })
               } else {
@@ -326,6 +346,10 @@ export class VoltageMonitor {
         void this.disconnect()
       }, 10000)
     }
+    if (!this.scanPending) {
+      this.finishScan?.(state)
+      this.finishScan = undefined
+    }
     this.onConnectionScan(state)
   }
 
@@ -334,15 +358,20 @@ export class VoltageMonitor {
       this.onError('Connect to a writable serial port before scanning.')
       return
     }
-    if (this.scanPending || this.ledPending || this.writer) return
+    if (this.scanPending || this.ledPending || this.probe || this.writer) return
+    const result = new Promise<ScanState>((resolve) => { this.finishScan = resolve })
     this.updateScan({ status: 'scanning', completedSources: 0 })
     await this.writeCommand({ type: 'scan_connections' })
+    return result
   }
 
   private updateLed(state: LedState) {
     clearTimeout(this.ledTimer)
-    if (state.status !== 'pending') this.ledPending = undefined
-    else {
+    if (state.status !== 'pending') {
+      this.ledPending = undefined
+      this.finishLed?.(state)
+      this.finishLed = undefined
+    } else {
       this.ledTimer = setTimeout(() => {
         this.updateLed({ status: 'error', message: 'LED acknowledgement timed out. Reconnect before retrying.' })
         void this.disconnect()
@@ -356,7 +385,7 @@ export class VoltageMonitor {
       this.updateLed({ status: 'error', message: 'Connect to a writable serial port before controlling LEDs.' })
       return
     }
-    if (this.scanPending || this.ledPending || this.writer) return
+    if (this.scanPending || this.ledPending || this.probe || this.writer) return
     const valid = command.type === 'clear_leds' ||
       (command.type === 'set_brightness' && byte(command.brightness)) ||
       ((command.type === 'set_led' || command.type === 'fill_leds') &&
@@ -366,12 +395,40 @@ export class VoltageMonitor {
       this.updateLed({ status: 'error', message: 'Invalid LED index, colour, or brightness.' })
       return
     }
+    const result = new Promise<LedState>((resolve) => { this.finishLed = resolve })
     this.ledPending = { ...command }
     this.updateLed({ status: 'pending' })
     await this.writeCommand(command)
+    return result
   }
 
-  private async writeCommand(command: LedCommand | { type: 'scan_connections' }) {
+  private finishProbe(result: ProbeOutcome) {
+    const probe = this.probe
+    if (!probe) return
+    clearTimeout(probe.timer)
+    this.probe = undefined
+    probe.resolve(result)
+  }
+
+  async probeNodes(source: number, target: number): Promise<number> {
+    if (!channel(source) || !channel(target) || source === target) throw new Error('Invalid probe channels.')
+    if (this.state !== 'connected' || this.stopping || !this.port?.writable) throw new Error('Connect before probing.')
+    if (this.scanPending || this.ledPending || this.probe || this.writer) throw new Error('A serial command is already running.')
+    const command: ProbeCommand = { type: 'probe', source, target }
+    const result = new Promise<ProbeOutcome>((resolve) => {
+      const timer = setTimeout(() => {
+        this.finishProbe({ error: 'Probe timed out. Reconnect before retrying.' })
+        void this.disconnect()
+      }, 10000)
+      this.probe = { command, resolve, timer }
+    })
+    await this.writeCommand(command)
+    const response = await result
+    if ('error' in response) throw new Error(response.error)
+    return response.voltage
+  }
+
+  private async writeCommand(command: LedCommand | ProbeCommand | { type: 'scan_connections' }) {
     let writer: WritableStreamDefaultWriter<Uint8Array> | undefined
     try {
       if (!this.port?.writable) throw new Error('Serial port unavailable.')
@@ -382,6 +439,7 @@ export class VoltageMonitor {
       if (!this.stopping) {
         const failure = { status: 'error' as const, message: `Could not send ${command.type} command: ${String(error)}` }
         if (command.type === 'scan_connections') this.updateScan(failure)
+        else if (command.type === 'probe') this.finishProbe({ error: failure.message })
         else this.updateLed(failure)
         // A failed write may have been partially delivered; reconnect before retrying.
         void this.disconnect()

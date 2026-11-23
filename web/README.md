@@ -9,7 +9,7 @@ pnpm dev
 
 Open the localhost URL printed by Vite in desktop Chrome or Edge. Web Serial requires a secure context; localhost is supported.
 
-1. Flash the Milestone 6B UF2 onto the RP2040-Zero and connect it over USB.
+1. Flash the 15-node firmware UF2 onto the RP2040-Zero and connect it over USB.
 2. Close picocom or any other application using the serial port.
 3. Click **Connect** and select the board's USB serial port.
 4. The voltage table updates approximately once per second.
@@ -29,11 +29,19 @@ The LED controls send `set_led`, `fill_leds`, `clear_leds`, or `set_brightness` 
 
 Only one LED command can be pending at a time. LED controls are disabled while disconnected or scanning. Scan and Disconnect are disabled while awaiting an LED acknowledgement. Both serial command paths share a writer, preventing overlapping writes. Firmware errors end the pending action; missing acknowledgements time out after 10 seconds and close the connection before retrying.
 
-`LED_COUNT` in `src/serial.ts` is 100 and must match `LED_STRIP_COUNT` in the firmware if you change the configured count. Inputs validate indices 0–99 and RGB/brightness integers 0–255. The web app does not query or persist strip state.
+`LED_COUNT` in `src/serial.ts` is 15 and must match `LED_STRIP_COUNT` in the firmware if you change the configured count. Inputs validate indices 0–14 and RGB/brightness integers 0–255. The web app does not query or persist strip state.
 
-Incoming NDJSON is buffered until a complete line is received, validated, and dispatched by message type: `voltage_scan`, `scan_progress`, `connection_scan`, `led_ack`, or `error`. Lines are bounded to 4096 characters. Invalid messages are reported and skipped. Scan results must account for all 16 channels without duplicates and contain finite directional voltages. Last readings/results remain visible with a disconnect indication until reconnecting. Floating nodes can show arbitrary readings.
+Incoming NDJSON is buffered until a complete line is received, validated, and dispatched by message type: `voltage_scan`, `scan_progress`, `connection_scan`, `probe_result`, `led_ack`, or `error`. Lines are bounded to 4096 characters. Invalid messages are reported and skipped. Scan results must account for all 15 channels without duplicates and contain finite directional voltages. Last readings/results remain visible with a disconnect indication until reconnecting. Floating nodes can show arbitrary readings.
 
 Serial communication and message validation are in `src/serial.ts`; the React UI is in `src/App.tsx`. Firmware schemas and thresholds are described in `../rpi/README.md`.
+
+## Guided divider demo
+
+Connect the board and click **Start Demo** with the external supply disconnected. Place a jumper across channels **0–1**, a **47 kΩ** resistor across **1–2**, and a second **47 kΩ** resistor across **2–3**. Check each placement in the app. The jumper uses a connectivity scan. Each resistor check probes in both directions, and an inconclusive reading can be confirmed manually. Blue LEDs indicate the current placement, green indicates a successful check, and red flags a placement to review.
+
+On the final step, connect supply ground to channel **3**, then connect 5 V to channel **0**. The app checks only passive readings at this step. Channel **2** should read about **2.08 V** at a 5.00 V input because the board's 115 kΩ measurement path loads the divider. Disconnect the external supply before restarting.
+
+The demo uses LED index `14 - channel` and sets brightness to 32. If USB disconnects, reconnect and start a new demo. The first action clears the strip. Channel assignments, LED mapping, probe bands, and voltage tolerances are in `src/guidedDemo.ts`. The starting probe bands are nominal. Confirm a jumper and each 47 kΩ resistor read in the expected bands on the prototype before presenting.
 
 Checks:
 

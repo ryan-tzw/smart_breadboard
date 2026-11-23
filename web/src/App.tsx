@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { getSerialApi, LED_COUNT, VoltageMonitor } from "./serial";
+import { CHANNEL_COUNT, getSerialApi, LED_COUNT, VoltageMonitor } from "./serial";
 import type { ConnectionState, LedCommand, LedState, ScanState } from "./serial";
+import { GuidedDemo } from "./GuidedDemo";
 import "./App.css";
 
 function App() {
@@ -16,6 +17,9 @@ function App() {
   const [brightness, setBrightness] = useState(255);
   const ledPending = led.status === "pending";
   const busy = scanning || ledPending;
+  const [demoActive, setDemoActive] = useState(false);
+  const latestReading = useRef<{ voltages: number[]; receivedAt: number } | null>(null);
+  const [reading, setReading] = useState<typeof latestReading.current>(null);
   const monitor = useRef<VoltageMonitor | null>(null);
   const supported = Boolean(getSerialApi());
 
@@ -26,10 +30,19 @@ function App() {
     const connection = new VoltageMonitor(
       serial,
       (nextState) => {
-        if (active) setState(nextState);
+        if (!active) return;
+        setState(nextState);
+        if (nextState !== "connected") {
+          latestReading.current = null;
+          setReading(null);
+          setDemoActive(false);
+        }
       },
       (values) => {
         if (!active) return;
+        const sample = { voltages: values, receivedAt: Date.now() };
+        latestReading.current = sample;
+        setReading(sample);
         setVoltages(values);
         setUpdatedAt(new Date());
       },
@@ -79,7 +92,7 @@ function App() {
   return (
     <main>
       <h1>Smart Breadboard</h1>
-      <p>Live voltage readings from 16 breadboard nodes.</p>
+      <p>Live voltage readings from {CHANNEL_COUNT} breadboard nodes.</p>
       <section className="connection" aria-label="Serial connection">
         <div className="controls">
           <button onClick={connect} disabled={!supported || state !== "disconnected"}>
@@ -100,6 +113,21 @@ function App() {
           </p>
         )}
       </section>
+      {state === "connected" ? (
+        <GuidedDemo
+          available={demoActive || !busy}
+          reading={reading}
+          getReading={() => latestReading.current}
+          getMonitor={() => monitor.current}
+          onActiveChange={setDemoActive}
+        />
+      ) : (
+        <section className="guided-demo" aria-labelledby="demo-title">
+          <h2 id="demo-title">Guided Demo</h2>
+          <p>Connect the smart breadboard to start the voltage divider demo.</p>
+          <button disabled>Start Demo</button>
+        </section>
+      )}
       <section className="connectivity" aria-labelledby="connectivity-title" aria-busy={scanning}>
         <h2 id="connectivity-title">Connectivity</h2>
         <p className="note">
@@ -107,7 +135,7 @@ function App() {
           indications.
         </p>
         <button
-          disabled={state !== "connected" || busy}
+          disabled={state !== "connected" || busy || demoActive}
           onClick={() => {
             setError("");
             void monitor.current?.scanConnections();
@@ -118,9 +146,9 @@ function App() {
         {scan.status === "idle" && <p role="status">No connectivity scan yet.</p>}
         {scan.status === "scanning" && (
           <>
-            <p role="status">Scanning: {scan.completedSources} / 16 sources measured.</p>
+            <p role="status">Scanning: {scan.completedSources} / {CHANNEL_COUNT} sources measured.</p>
             <progress
-              max={16}
+              max={CHANNEL_COUNT}
               value={scan.completedSources}
               aria-label="Connectivity scan progress"
             />
@@ -205,7 +233,7 @@ function App() {
             sendLed("set_led");
           }}
         >
-          <fieldset className="led-fields" disabled={state !== "connected" || busy}>
+          <fieldset className="led-fields" disabled={state !== "connected" || busy || demoActive}>
             <label>
               LED index (0–{LED_COUNT - 1})
               <input
@@ -280,7 +308,7 @@ function App() {
           </tr>
         </thead>
         <tbody>
-          {Array.from({ length: 16 }, (_, channel) => (
+          {Array.from({ length: CHANNEL_COUNT }, (_, channel) => (
             <tr key={channel}>
               <th scope="row">{channel}</th>
               <td>{voltages ? `${voltages[channel].toFixed(3)} V` : "—"}</td>

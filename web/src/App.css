@@ -16,6 +16,7 @@ p {
 
 .connection,
 .connectivity,
+.guided-demo,
 .led-control {
   margin: 24px 0;
   padding: 20px;
@@ -89,6 +90,7 @@ tbody th {
 }
 
 .connectivity h2,
+.guided-demo h2,
 .led-control h2 {
   margin-top: 0;
   color: var(--text-h);
@@ -103,7 +105,8 @@ tbody th {
   margin: 6px 0;
 }
 
-.connectivity progress {
+.connectivity progress,
+.guided-demo progress {
   width: 100%;
   accent-color: var(--accent);
 }
@@ -158,4 +161,11 @@ tbody th {
   width: 3ch;
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+.demo-circuit {
+  padding: 12px;
+  background: var(--code-bg);
+  color: var(--text-h);
+  border-radius: 4px;
 }
