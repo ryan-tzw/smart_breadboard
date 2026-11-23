@@ -33,15 +33,15 @@ p {
 
 button {
   padding: 10px 18px;
-  background: var(--accent-bg);
-  color: var(--accent);
+  background: var(--button-bg, var(--accent-bg));
+  color: var(--button-color, var(--accent));
   border: 2px solid transparent;
   border-radius: 5px;
   cursor: pointer;
 }
 
 button:hover:enabled {
-  border-color: var(--accent-border);
+  border-color: var(--button-border, var(--accent-border));
 }
 
 button:disabled {
@@ -163,9 +163,60 @@ tbody th {
   text-align: right;
 }
 
-.demo-circuit {
+.demo-instruction {
+  margin: 16px 0;
+  padding: 16px;
+  border-inline-start: 4px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-bg);
+  color: var(--text-h);
+}
+
+.demo-instruction h3 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.demo-instruction p {
+  margin: 8px 0 0;
+  font-size: 1.1rem;
+}
+
+.demo-blue-rows,
+.demo-negative-rail {
+  color: light-dark(#1746a2, #93c5fd);
+}
+
+.demo-positive-rail {
+  color: var(--error);
+}
+
+.demo-continue,
+.demo-exit {
+  --button-bg: color-mix(in srgb, var(--button-color) 14%, transparent);
+  --button-border: color-mix(in srgb, var(--button-color) 50%, transparent);
+}
+
+.demo-continue {
+  --button-color: light-dark(#209b4f, #43ff88);
+}
+
+.demo-exit {
+  --button-color: light-dark(#a32121, #db3c3c);
+}
+
+.demo-voltages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
   padding: 12px;
   background: var(--code-bg);
   color: var(--text-h);
   border-radius: 4px;
+}
+
+.demo-voltages dd {
+  margin: 4px 0 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }

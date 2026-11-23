@@ -2,7 +2,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import type { LedCommand, VoltageMonitor } from "./serial";
 import {
   ASSEMBLY_STEPS, checkPoweredDivider, classifyResistor, DEMO_BRIGHTNESS,
-  INPUT_MIN, LED_FOR_CHANNEL, MAX_READING_AGE_MS, PASSIVE_LIMIT, POWER_STEP, RESISTANCE_KOHM, ROWS,
+  GROUND_STEP, INPUT_MIN, LED_FOR_CHANNEL, MAX_READING_AGE_MS, PASSIVE_LIMIT, POWER_STEP, RESISTANCE_KOHM, ROWS,
 } from "./guidedDemo";
 
 type Reading = { voltages: number[]; receivedAt: number };
@@ -15,26 +15,28 @@ type Props = {
 };
 
 const blue = { r: 0, g: 0, b: 255 };
-const green = { r: 0, g: 255, b: 0 };
-const red = { r: 255, g: 0, b: 0 };
-const allRows = Object.values(ROWS);
+const sweepLedIndices = [...LED_FOR_CHANNEL].reverse();
+// Brightness 3 gives us three visible levels on the physical strip.
+const SWEEP_GREEN_LEVELS = [255, 170, 85, 0];
+const SWEEP_FRAME_MS = 40;
 
 export function GuidedDemo({ available, reading, getMonitor, getReading, onActiveChange }: Props) {
   const [step, setStep] = useState(-1);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
+  const [restartBlocked, setRestartBlocked] = useState(false);
   const [manual, setManual] = useState(false);
   const [powerSince, setPowerSince] = useState(0);
-  const [completed, setCompleted] = useState<ReturnType<typeof checkPoweredDivider> | null>(null);
+  const [completed, setCompleted] = useState(false);
   const operation = useRef<AbortController | null>(null);
 
   useEffect(() => () => operation.current?.abort(), []);
 
   const assembly = ASSEMBLY_STEPS[step];
-  const voltageDetected = reading?.voltages.some((voltage) => voltage > PASSIVE_LIMIT) ?? false;
+  const highChannel = reading?.voltages.findIndex((voltage) => voltage > PASSIVE_LIMIT) ?? -1;
+  const showVoltageWarning = highChannel >= 0 && (step < POWER_STEP || restartBlocked);
   const powered = step === POWER_STEP && reading && reading.receivedAt > powerSince
     ? checkPoweredDivider(reading.voltages) : null;
-  const shown = completed ?? powered;
 
   async function run(work: (monitor: VoltageMonitor, signal: AbortSignal) => Promise<void>) {
     const monitor = getMonitor();
@@ -57,9 +59,7 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
     if (!latest || Date.now() - latest.receivedAt > MAX_READING_AGE_MS) {
       throw new Error("Waiting for a fresh voltage scan. Try again in a moment.");
     }
-    if (latest.voltages.some((voltage) => voltage > PASSIVE_LIMIT)) {
-      throw new Error("Voltage detected. Disconnect the external supply and try again.");
-    }
+    return latest.voltages.every((voltage) => voltage <= PASSIVE_LIMIT);
   }
 
   async function setLights(monitor: VoltageMonitor, signal: AbortSignal, commands: LedCommand[]) {
@@ -77,13 +77,39 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
     return rows.map((row) => ({ type: "set_led", index: LED_FOR_CHANNEL[row], ...colour }));
   }
 
+  async function sweepSuccess(monitor: VoltageMonitor, signal: AbortSignal, nextRows: number[]) {
+    await setLights(monitor, signal, [{ type: "clear_leds" }]);
+    const tailLength = SWEEP_GREEN_LEVELS.length - 1;
+    for (let head = 0; head < sweepLedIndices.length + tailLength; head++) {
+      const frame: LedCommand[] = [];
+      const first = Math.max(0, head - tailLength);
+      const last = Math.min(head, sweepLedIndices.length - 1);
+      for (let position = first; position <= last; position++) {
+        frame.push({
+          type: "set_led",
+          index: sweepLedIndices[position],
+          r: 0,
+          g: SWEEP_GREEN_LEVELS[head - position],
+          b: 0,
+        });
+      }
+      await setLights(monitor, signal, frame);
+      await new Promise<void>((resolve) => setTimeout(resolve, SWEEP_FRAME_MS));
+    }
+    await setLights(monitor, signal, [{ type: "clear_leds" }, ...pixels(nextRows, blue)]);
+  }
+
   function start() {
     void run(async (monitor, signal) => {
-      requireUnpowered();
+      setFeedback("");
+      if (!requireUnpowered()) {
+        setRestartBlocked(step === POWER_STEP);
+        return;
+      }
+      setRestartBlocked(false);
       onActiveChange(true);
       setStep(0);
-      setCompleted(null);
-      setFeedback("");
+      setCompleted(false);
       setManual(false);
       const first = ASSEMBLY_STEPS[0];
       await setLights(monitor, signal, [
@@ -96,11 +122,12 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
   function check(manuallyConfirmed = false) {
     if (!assembly) return;
     void run(async (monitor, signal) => {
-      requireUnpowered();
+      setFeedback("");
+      if (!requireUnpowered()) return;
       setManual(false);
       setFeedback("Checking connection…");
       const { from, to } = assembly;
-      let feedback = "Jumper connection detected.";
+      let feedback = "Jumper wire connection detected.";
 
       if (!manuallyConfirmed && step === 0) {
         const reply = await monitor.scanConnections();
@@ -114,15 +141,17 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
           setFeedback(reply.result.status === "ambiguous"
             ? "Scan inconclusive. Check the wiring and try again."
             : unexpected.length
-              ? `Unexpected connection to channel ${unexpected.join(", ")}. Move the jumper to channel ${to}.`
+              ? `Unexpected connection to channel ${unexpected.join(", ")}. Move the jumper wire to channel ${to}.`
               : `No connection detected between channels ${from} and ${to}.`);
-          await setLights(monitor, signal, pixels(unexpected.length ? unexpected : [from], red));
           return;
         }
       } else if (!manuallyConfirmed) {
         const forward = await monitor.probeNodes(from, to);
         signal.throwIfAborted();
-        requireUnpowered();
+        if (!requireUnpowered()) {
+          setFeedback("");
+          return;
+        }
         const reverse = await monitor.probeNodes(to, from);
         signal.throwIfAborted();
         const classification = classifyResistor(forward, reverse);
@@ -130,9 +159,8 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
         if (classification !== "resistor") {
           setManual(classification === "inconclusive");
           setFeedback(classification === "open" ? `No connection detected. ${readings}`
-            : classification === "jumper" ? `Readings look like a jumper. Use a ${RESISTANCE_KOHM} kΩ resistor. ${readings}`
+            : classification === "jumper" ? `Readings look like a jumper wire. Use a ${RESISTANCE_KOHM} kΩ resistor. ${readings}`
             : `Inconclusive. Check the resistor placement or confirm it manually. ${readings}`);
-          await setLights(monitor, signal, pixels([from, to], red));
           return;
         }
         feedback = `Readings consistent with ${RESISTANCE_KOHM} kΩ. ${readings}`;
@@ -141,23 +169,28 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
       }
 
       const next = ASSEMBLY_STEPS[step + 1];
-      const targets = next ? [next.from, next.to] : [ROWS.input, ROWS.ground];
-      await setLights(monitor, signal, [
-        { type: "clear_leds" },
-        ...pixels(targets, blue),
-        ...pixels([from, to].filter((row) => !targets.includes(row)), manuallyConfirmed ? blue : green),
-      ]);
+      const targets = next ? [next.from, next.to] : [ROWS.ground];
       setFeedback(feedback);
+      await sweepSuccess(monitor, signal, targets);
       setStep(step + 1);
-      if (!next) setPowerSince(Date.now());
     });
   }
 
-  const completePoweredStep = useEffectEvent((result: ReturnType<typeof checkPoweredDivider>) => {
+  function confirmGround() {
     void run(async (monitor, signal) => {
-      setCompleted(result);
+      setFeedback("");
+      if (!requireUnpowered()) return;
+      await sweepSuccess(monitor, signal, [ROWS.input]);
+      setPowerSince(Date.now());
+      setStep(POWER_STEP);
+    });
+  }
+
+  const completePoweredStep = useEffectEvent(() => {
+    void run(async (monitor, signal) => {
+      setCompleted(true);
       setFeedback("The input, midpoint, and ground readings match the expected divider.");
-      await setLights(monitor, signal, [{ type: "clear_leds" }, ...pixels(allRows, green)]);
+      await sweepSuccess(monitor, signal, []);
     });
   });
 
@@ -165,7 +198,7 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
     if (busy || completed || step !== POWER_STEP || !reading || reading.receivedAt <= powerSince) return;
     const result = checkPoweredDivider(reading.voltages);
     if (!result.valid || Date.now() - reading.receivedAt > MAX_READING_AGE_MS) return;
-    const scheduled = setTimeout(() => completePoweredStep(result), 0);
+    const scheduled = setTimeout(() => completePoweredStep(), 0);
     return () => clearTimeout(scheduled);
   }, [busy, completed, powerSince, reading, step]);
 
@@ -174,6 +207,7 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
       await setLights(monitor, signal, [{ type: "clear_leds" }]);
       setStep(-1);
       setFeedback("");
+      setRestartBlocked(false);
       onActiveChange(false);
     });
   }
@@ -181,41 +215,65 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
   return (
     <section className="guided-demo" aria-labelledby="demo-title">
       <h2 id="demo-title">Guided Demo</h2>
+      {showVoltageWarning && (
+        <p className="error" role="alert">
+          Channel {highChannel} reads {reading?.voltages[highChannel].toFixed(3)} V.
+          Active checks require all monitored nodes to read at or below {PASSIVE_LIMIT.toFixed(1)} V.
+          Check whether the + rail is connected to a monitored row.
+        </p>
+      )}
       {step < 0 ? (
         <>
-          <p>Build a voltage divider with a jumper and two {RESISTANCE_KOHM} kΩ resistors. Disconnect the external supply before starting.</p>
+          <p>Build a voltage divider with a jumper wire and two {RESISTANCE_KOHM} kΩ resistors. Disconnect the external supply before starting.</p>
           <button disabled={!available || busy} onClick={start}>Start Demo</button>
         </>
       ) : (
         <>
           <p className="note">Step {step + 1} of {POWER_STEP + 1}</p>
           <progress aria-label="Demo progress" max={POWER_STEP + 1} value={completed ? POWER_STEP + 1 : step} />
-          <h3>{completed ? "Divider complete" : assembly?.title ?? "Power the divider"}</h3>
-          <p className="demo-circuit" aria-label="Divider wiring">
-            5 V → Ch {ROWS.input} → jumper → Ch {ROWS.resistorStart} → {RESISTANCE_KOHM} kΩ → Ch {ROWS.midpoint} → {RESISTANCE_KOHM} kΩ → Ch {ROWS.ground} → GND
-          </p>
-          {assembly ? (
-            <p>Connect {assembly.component} between channels {assembly.from} and {assembly.to}. Keep the external supply disconnected.</p>
-          ) : !completed && (
-            <p>Connect the supply ground to channel {ROWS.ground}, then connect 5 V to channel {ROWS.input}. The app checks the voltage automatically.</p>
+          <div className="demo-instruction">
+            <h3>{completed ? "Divider complete" : assembly?.title ?? (step === GROUND_STEP ? "Connect the − rail" : "Connect the + rail")}</h3>
+            {assembly ? (
+              <p>
+                Connect {assembly.component} between the{" "}
+                <strong className="demo-blue-rows">two rows lit by blue LEDs</strong>{" "}
+                (channels {assembly.from} and {assembly.to}). Keep the external supply disconnected.
+              </p>
+            ) : step === GROUND_STEP ? (
+              <p>Connect the row marked by the blue LED (channel {ROWS.ground}) to the <strong className="demo-negative-rail">− rail (GND)</strong>. Leave the <strong className="demo-positive-rail">+ rail</strong> disconnected from the divider for now.</p>
+            ) : !completed && (
+              <p>Connect the row marked by the blue LED (channel {ROWS.input}) to the <strong className="demo-positive-rail">+ rail (5 V)</strong>. The app checks the divider voltage automatically.</p>
+            )}
+          </div>
+          {!completed && powered && !powered.valid && (
+            <p>{powered.input < INPUT_MIN ? "Waiting for 5 V input." : "Outside the expected range. Check the wiring."}</p>
           )}
-          {shown && (
-            <p>
-              Input {shown.input.toFixed(2)} V · After jumper {shown.afterJumper.toFixed(2)} V · Midpoint {shown.midpoint.toFixed(2)} V
-              {" "}(expected {shown.expected.toFixed(2)} V) · Ground {shown.ground.toFixed(2)} V
-              {!shown.valid && (shown.input < INPUT_MIN ? " · Waiting for 5 V input." : " · Outside the expected range. Check the wiring.")}
-            </p>
-          )}
-          {!assembly && <p>Disconnect the external supply before restarting or running an active check.</p>}
-          {assembly && voltageDetected && <p className="error" role="alert">Voltage detected. Disconnect the external supply before checking connections.</p>}
+          {step === POWER_STEP && <p>Disconnect the external supply before restarting or running an active check.</p>}
           <div className="controls">
-            {assembly && <button disabled={busy || !available || voltageDetected} onClick={() => check()}>Check Connection</button>}
+            {assembly && (
+              <button className="demo-continue" disabled={busy || !available || highChannel >= 0} onClick={() => check()}>
+                Check Connection &amp; Continue
+              </button>
+            )}
             {assembly && manual && (
-              <button disabled={busy || !available || voltageDetected} onClick={() => check(true)}>Confirm Placement Manually</button>
+              <button disabled={busy || !available || highChannel >= 0} onClick={() => check(true)}>Confirm Placement Manually</button>
+            )}
+            {step === GROUND_STEP && (
+              <button disabled={busy || !available || highChannel >= 0} onClick={confirmGround}>Confirm − Rail Connected</button>
             )}
             <button disabled={busy || !available} onClick={start}>Restart Demo</button>
-            <button disabled={busy || !available} onClick={exit}>Exit Demo</button>
+            <button className="demo-exit" disabled={busy || !available} onClick={exit}>Exit Demo</button>
           </div>
+          <dl className="demo-voltages">
+            <div>
+              <dt>Source voltage</dt>
+              <dd>{reading ? `${reading.voltages[ROWS.input].toFixed(2)} V` : "—"}</dd>
+            </div>
+            <div>
+              <dt>Divided voltage</dt>
+              <dd>{reading ? `${reading.voltages[ROWS.midpoint].toFixed(2)} V` : "—"}</dd>
+            </div>
+          </dl>
         </>
       )}
       {feedback && <p role="status">{feedback}</p>}
