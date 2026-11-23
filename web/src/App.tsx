@@ -92,7 +92,6 @@ function App() {
   return (
     <main>
       <h1>Smart Breadboard</h1>
-      <p>Live voltage readings from {CHANNEL_COUNT} breadboard nodes.</p>
       <section className="connection" aria-label="Serial connection">
         <div className="controls">
           <button onClick={connect} disabled={!supported || state !== "disconnected"}>
@@ -294,6 +293,7 @@ function App() {
           </p>
         )}
       </section>
+      <p>Live voltage readings from {CHANNEL_COUNT} breadboard nodes.</p>
       <p className="updated">
         {updatedAt
           ? `Last scan: ${updatedAt.toLocaleTimeString()}${state !== "connected" ? " (disconnected; readings retained)" : ""}`

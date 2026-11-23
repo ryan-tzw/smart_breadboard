@@ -1,8 +1,8 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import type { LedCommand, VoltageMonitor } from "./serial";
 import {
-  ASSEMBLY_STEPS, checkPoweredDivider, classifyResistor, DEMO_BRIGHTNESS,
-  GROUND_STEP, INPUT_MIN, LED_FOR_CHANNEL, MAX_READING_AGE_MS, PASSIVE_LIMIT, POWER_STEP, RESISTANCE_KOHM, ROWS,
+  ASSEMBLY_STEPS, checkPoweredDivider, CONNECTION_MIN_VOLTS, DEMO_BRIGHTNESS,
+  GROUND_STEP, INPUT_MIN, LED_FOR_CHANNEL, MAX_READING_AGE_MS, PASSIVE_LIMIT, POWER_STEP, ROWS,
 } from "./guidedDemo";
 
 type Reading = { voltages: number[]; receivedAt: number };
@@ -25,7 +25,6 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [restartBlocked, setRestartBlocked] = useState(false);
-  const [manual, setManual] = useState(false);
   const [powerSince, setPowerSince] = useState(0);
   const [completed, setCompleted] = useState(false);
   const operation = useRef<AbortController | null>(null);
@@ -110,7 +109,6 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
       onActiveChange(true);
       setStep(0);
       setCompleted(false);
-      setManual(false);
       const first = ASSEMBLY_STEPS[0];
       await setLights(monitor, signal, [
         { type: "clear_leds" }, { type: "set_brightness", brightness: DEMO_BRIGHTNESS },
@@ -119,17 +117,16 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
     });
   }
 
-  function check(manuallyConfirmed = false) {
+  function check() {
     if (!assembly) return;
     void run(async (monitor, signal) => {
       setFeedback("");
       if (!requireUnpowered()) return;
-      setManual(false);
       setFeedback("Checking connection…");
       const { from, to } = assembly;
-      let feedback = "Jumper wire connection detected.";
+      let feedback = "Electrical connection detected.";
 
-      if (!manuallyConfirmed && step === 0) {
+      if (step === 0) {
         const reply = await monitor.scanConnections();
         signal.throwIfAborted();
         if (reply?.status !== "complete") {
@@ -145,7 +142,8 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
               : `No connection detected between channels ${from} and ${to}.`);
           return;
         }
-      } else if (!manuallyConfirmed) {
+        feedback = "Jumper wire connection detected.";
+      } else {
         const forward = await monitor.probeNodes(from, to);
         signal.throwIfAborted();
         if (!requireUnpowered()) {
@@ -154,18 +152,10 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
         }
         const reverse = await monitor.probeNodes(to, from);
         signal.throwIfAborted();
-        const classification = classifyResistor(forward, reverse);
-        const readings = `${forward.toFixed(3)} V forward, ${reverse.toFixed(3)} V reverse.`;
-        if (classification !== "resistor") {
-          setManual(classification === "inconclusive");
-          setFeedback(classification === "open" ? `No connection detected. ${readings}`
-            : classification === "jumper" ? `Readings look like a jumper wire. Use a ${RESISTANCE_KOHM} kΩ resistor. ${readings}`
-            : `Inconclusive. Check the resistor placement or confirm it manually. ${readings}`);
+        if (forward < CONNECTION_MIN_VOLTS || reverse < CONNECTION_MIN_VOLTS) {
+          setFeedback("Connection not confirmed in both directions. Check the two blue rows and try again.");
           return;
         }
-        feedback = `Readings consistent with ${RESISTANCE_KOHM} kΩ. ${readings}`;
-      } else {
-        feedback = "Placement confirmed manually. The powered check will verify the divider output.";
       }
 
       const next = ASSEMBLY_STEPS[step + 1];
@@ -224,7 +214,7 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
       )}
       {step < 0 ? (
         <>
-          <p>Build a voltage divider with a jumper wire and two {RESISTANCE_KOHM} kΩ resistors. Disconnect the external supply before starting.</p>
+          <p>Build a voltage divider with a jumper wire and two matching resistors. Disconnect the external supply before starting.</p>
           <button disabled={!available || busy} onClick={start}>Start Demo</button>
         </>
       ) : (
@@ -251,12 +241,9 @@ export function GuidedDemo({ available, reading, getMonitor, getReading, onActiv
           {step === POWER_STEP && <p>Disconnect the external supply before restarting or running an active check.</p>}
           <div className="controls">
             {assembly && (
-              <button className="demo-continue" disabled={busy || !available || highChannel >= 0} onClick={() => check()}>
+              <button className="demo-continue" disabled={busy || !available || highChannel >= 0} onClick={check}>
                 Check Connection &amp; Continue
               </button>
-            )}
-            {assembly && manual && (
-              <button disabled={busy || !available || highChannel >= 0} onClick={() => check(true)}>Confirm Placement Manually</button>
             )}
             {step === GROUND_STEP && (
               <button disabled={busy || !available || highChannel >= 0} onClick={confirmGround}>Confirm − Rail Connected</button>

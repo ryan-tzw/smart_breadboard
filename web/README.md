@@ -37,11 +37,11 @@ Serial communication and message validation are in `src/serial.ts`; the React UI
 
 ## Guided divider demo
 
-Connect the board and click **Start Demo** with the external supply disconnected. Place a jumper wire across channels **0–1**, a **47 kΩ** resistor across **1–2**, and a second **47 kΩ** resistor across **2–3**. Check each placement in the app. The jumper wire check uses a connectivity scan. Each resistor check probes in both directions, and an inconclusive reading can be confirmed manually. Blue LEDs indicate the current placement. On completion, a green wave with a fading trail crosses the strip before the next placement is highlighted. Wiring feedback appears in the app.
+Connect the board and click **Start Demo** with the external supply disconnected. Place a jumper wire across channels **0–1**, a resistor across **1–2**, and a matching resistor across **2–3**. The jumper wire check uses a connectivity scan. The resistor steps check for electrical continuity in both directions. The final powered step verifies the divider output. Blue LEDs indicate the current placement. On completion, a green wave with a fading trail crosses the strip before the next placement is highlighted. Wiring feedback appears in the app.
 
-Connect channel **3** to the **− rail (GND)** and confirm in the app. The final step highlights channel **0** for the **+ rail (5 V)**. Both rail steps use passive readings. The demo shows the live source and divided voltages. Channel **2** should read about **2.08 V** at a 5.00 V input because the board's 115 kΩ measurement path loads the divider. Disconnect the external supply before restarting.
+Connect channel **3** to the **− rail (GND)** and confirm in the app. The final step highlights channel **0** for the **+ rail (5 V)**. Both rail steps use passive readings. The demo shows the live source and divided voltages. Channel **2** should read about **2.49 V** at a 5.00 V input because the board's 115 kΩ measurement path loads the divider. Disconnect the external supply before restarting.
 
-The demo uses LED index `14 - channel` and defaults to brightness 3. If USB disconnects, reconnect and start a new demo. The first action clears the strip. Channel assignments, LED mapping, brightness, probe bands, and voltage tolerances are in `src/guidedDemo.ts`. The starting probe bands are nominal. Confirm a jumper wire and each 47 kΩ resistor read in the expected bands on the prototype before presenting.
+The demo uses LED index `14 - channel` and defaults to brightness 3. If USB disconnects, reconnect and start a new demo. The first action clears the strip. Channel assignments, LED mapping, brightness, and voltage tolerances are in `src/guidedDemo.ts`. The powered check is configured for the presentation’s 1 kΩ pair.
 
 Checks:
 
