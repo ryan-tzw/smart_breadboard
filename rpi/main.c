@@ -7,7 +7,7 @@
 #include "command_parser.h"
 #include "led_strip.h"
 
-#define CHANNEL_COUNT 16
+#define CHANNEL_COUNT 15
 #define MUX_SELECT_MASK 0x0fu
 #define INJECTION_SELECT_MASK 0xf0u
 #define INJECTION_ENABLE_PIN 8
@@ -161,7 +161,7 @@ static void handle_command(const char *text)
         // --------------------
         // measurement and cleanup
         // --------------------
-        // A scan measures 15 targets per source, within the 20 ms cutoff.
+        // A scan measures the other 14 channels within the 20 ms cutoff.
         // No USB printing or command parsing while injection is enabled.
         for (uint target = scanning ? 0 : requested_target;
              target < (scanning ? CHANNEL_COUNT : requested_target + 1); ++target)

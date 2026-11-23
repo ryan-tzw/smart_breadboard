@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #ifndef LED_STRIP_COUNT
-#define LED_STRIP_COUNT 100
+#define LED_STRIP_COUNT 15
 #endif
 
 #ifndef LED_STRIP_SELF_TEST
